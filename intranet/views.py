@@ -8,6 +8,7 @@ from django.contrib.auth import login, authenticate
 from . import models
 import jwt, datetime
 import json
+import pandas as pd
 
 @api_view(['GET', 'POST', 'OPTIONS'])
 def login(request):
@@ -58,13 +59,60 @@ def user_validate(request):
             raise AuthenticationFailed('Debes estar logueado')
         return Response({"message":'usuario valido'})
     
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 def translate_products_prepago(request):
     if request.method == 'GET':
         models.Traducciones.objects.filter(tipo='prepago')
         return Response()
+    if request.method == 'POST':
+        new_translate = models.Traducciones.objects.create(
+            equipo=request.data['equipo'],
+            stok=request.data['stok'],
+            iva =request.data['iva'] ,
+            active=request.data['active'] ,
+            tipo= 'prepago'
+        )
+        new_translate.save()
+        return Response({'message':'equipo creado con exito'})
 
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
-        pass
+        # transnew = models.Traducciones.objects.create(
+        #     equipo='equipoejemplo',
+        #     stok='stokejemplo',
+        #     iva = True,
+        #     active= True,
+        #     tipo='prepago'
+        # )
+        # transnew.save()
+        data = requests.data
+        translates = (models.Traducciones.objects.filter(tipo='prepago'))
+        translates = [{
+            'equipo': item.equipo,
+            'stok': item.stok,
+            'iva': item.iva,
+            'active': item.active,
+            'tipo': item.tipo
+        } for item in translates]
+        df_translates = pd.DataFrame(translates)
+        print(df_translates)
+        df_equipos = pd.DataFrame(data)
+        df_equipos.columns = ['equipo']
+        print('---------')
+        print(df_equipos)
+        equipos_origen = df_equipos[df_equipos.columns[0]]
+        equipos_translate = df_translates['equipo']
+        equipos_no_encontrados = equipos_origen[~equipos_origen.isin(equipos_translate)]
+        crediminuto = []
+        if len(equipos_no_encontrados) > 0:
+            validate = False
+            data = equipos_no_encontrados.to_list()
+        else:
+            validate = True
+            nuevo_df = df_equipos.merge(df_translates, on='equipo', how='left')
+            nuevo_df['costo'] = 10
+            nuevo_df = nuevo_df[['stok', 'costo']]
+            data = nuevo_df.values.tolist()
+            
+        return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto})

@@ -8,3 +8,6 @@ class Traducciones(models.Model):
     iva = models.BooleanField()
     active = models.BooleanField()
     tipo = models.CharField(max_length=255)
+
+    def __str__(self) -> str:
+        return self.equipo
