@@ -28,11 +28,12 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "http://teamcomunicaciones.com.co/",
     "http://api.teamcomunicaciones.com.co/",
+    "localhost",
 ]
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
-    "http://teamcomunicaciones.com.co/",
-    "http://api.teamcomunicaciones.com.co/",
+    "http://api.teamcomunicaciones.com.co",
+    "http://teamcomunicaciones.com.co",
 ]
 
 
