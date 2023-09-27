@@ -26,8 +26,8 @@ SECRET_KEY = 'django-insecure-mvnc@4-+q(szu$s++*vur_0vbn0jvh=pu04h=x^ll&z)5pm(xm
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    "https://teamcomunicaciones.com.co/",
-    "https://api.teamcomunicaciones.com.co/",
+    "teamcomunicaciones.com.co",
+    "api.teamcomunicaciones.com.co",
     "localhost",
 ]
 CORS_ALLOW_ALL_ORIGINS = True
