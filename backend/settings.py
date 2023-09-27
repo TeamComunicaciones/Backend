@@ -26,8 +26,8 @@ SECRET_KEY = '***REMOVED-SECRET_KEY***'
 DEBUG = True
 
 ALLOWED_HOSTS = [
-    "https://teamcomunicaciones.com.co/",
-    "https://api.teamcomunicaciones.com.co/",
+    "teamcomunicaciones.com.co",
+    "api.teamcomunicaciones.com.co",
     "localhost",
 ]
 CORS_ALLOW_ALL_ORIGINS = True
