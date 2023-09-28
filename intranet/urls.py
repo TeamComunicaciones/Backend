@@ -17,4 +17,5 @@ urlpatterns = [
     path('create-user', views.login),
     path('translate-products-prepago', views.translate_products_prepago),
     path('translate-prepago', views.translate_prepago),
+    path('lista-productos-prepago', views.lista_productos_prepago),
 ]

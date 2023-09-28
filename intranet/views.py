@@ -6,10 +6,13 @@ from django.dispatch import receiver
 from rest_framework.response import Response
 from django.shortcuts import render
 from django.contrib.auth import login, authenticate
+from sqlControl.sqlControl import Sql_conexion
 from . import models
 import jwt, datetime
 import json
 import pandas as pd
+from decimal import Decimal
+import locale
 
 @api_view(['GET', 'POST', 'OPTIONS'])
 def login(request):
@@ -33,7 +36,6 @@ def login(request):
         else:
             raise AuthenticationFailed('Clave o contraseña erroneas')
     raise AuthenticationFailed('Solo metodo POST')
-
 
 @api_view(['GET', 'POST', 'OPTIONS'])
 def create_user(request):
@@ -190,17 +192,66 @@ def permissions_edit(request):
 @api_view(['GET', 'POST'])
 def translate_products_prepago(request):
     if request.method == 'GET':
-        models.Traducciones.objects.filter(tipo='prepago')
-        return Response()
+        traducciones = models.Traducciones.objects.filter(tipo='prepago')
+        data = []
+        for i in traducciones:
+            subdata = {
+                'producto': i.equipo,
+                'stok': i.stok,
+                'iva': i.iva,
+                'active': i.active,
+            }
+            data.append(subdata)
+        return Response(data)
     if request.method == 'POST':
-        new_translate = models.Traducciones.objects.create(
-            equipo=request.data['equipo'],
-            stok=request.data['stok'],
-            iva =request.data['iva'] ,
-            active=request.data['active'] ,
-            tipo= 'prepago'
+        data = request.body
+        data = json.loads(data)
+        equipo = data['equipo'],
+        stok = data['stok'],
+        iva = data['iva'] ,
+        active = data['active'] ,
+        tipo = 'prepago'
+        query = (
+            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "  
+            "FROM dbo.ldpProductosXAsociaciones lProd " 
+            "JOIN dbo.ldpListadePrecios  lPre ON lProd.ListaDePrecios = lPre.Codigo " 
+            "JOIN dbo.Productos  P ON lProd.Producto = P.Codigo " 
+            "JOIN dbo.TiposDeProducto  TP ON P.TipoDeProducto = TP.Codigo " 
+            f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1 and P.Nombre = '{stok[0]}';"
         )
-        new_translate.save()
+        conexion = Sql_conexion(query)
+        data2 = conexion.get_data()
+        if len(data2) == 0:
+            raise AuthenticationFailed('Producto inexistente en Stok')
+        
+        listaStok = []
+        for dato in data2:
+            nombreStok = dato[0]
+            if nombreStok not in listaStok:
+                listaStok.append(nombreStok)
+        for nstok in listaStok:
+            validacion = nstok == stok
+            if validacion == False:
+                raise AuthenticationFailed(f'intente usar {nstok} y no {stok}')
+        
+        traduccion = models.Traducciones.objects.filter(equipo = request.data['equipo']).first()
+
+        if traduccion:
+            traduccion.stok
+            traduccion.iva
+            traduccion.active
+            traduccion.save()
+
+        else:
+            new_translate = models.Traducciones.objects.create(
+                equipo=request.data['equipo'],
+                stok=request.data['stok'],
+                iva =request.data['iva'] ,
+                active=request.data['active'] ,
+                tipo= 'prepago'
+            )
+            new_translate.save()
+
         return Response({'message':'equipo creado con exito'})
 
 @api_view(['POST'])
@@ -264,6 +315,78 @@ def translate_prepago(requests):
             
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto})
     
+@api_view(['GET', 'POST'])
+def lista_productos_prepago(requests):
+    if requests.method == 'GET':
+        query = (
+            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "  
+            "FROM dbo.ldpProductosXAsociaciones lProd " 
+            "JOIN dbo.ldpListadePrecios  lPre ON lProd.ListaDePrecios = lPre.Codigo " 
+            "JOIN dbo.Productos  P ON lProd.Producto = P.Codigo " 
+            "JOIN dbo.TiposDeProducto  TP ON P.TipoDeProducto = TP.Codigo " 
+            # f"WHERE P.Visible = 1;"
+            f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1;"
+        )
+        conexion = Sql_conexion(query)
+        data2 = conexion.get_data()
+        equipo = []
+        precio = []
+        valor = []
+        for i in data2:
+            if i[0] != '.':
+                equipo.append(i[0])
+                precio.append(i[1])
+                valor.append("{:.2f}".format(i[2].quantize(Decimal('0.00'))))
+        data = {
+            'equipo': equipo,
+            'precio': precio,
+            'valor': valor,
+        }
+        df = pd.DataFrame(data)
+        # Pivota los datos
+        pivot_df = df.pivot(index='equipo', columns='precio', values='valor').reset_index()
+
+        # Reinicia el índice
+        pivot_df.reset_index(drop=True, inplace=True)
+
+        # Cambia el nombre de las columnas resultantes
+        pivot_df.columns.name = None
+        pivot_df = pivot_df.fillna('0')
+        precios = pivot_df.to_dict(orient='records')
+        return Response({'data' : precios})
+    
+    if requests.method == 'POST':
+        data = requests.data['data']
+        precio = requests.data['precio']
+        new_data = []
+        locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
+        base_iva = 100000
+        mensaje = 'no aplica'
+        for i in data:
+            sim = 2000
+            if float(i[precio]) > 100000000:
+                iva = mensaje
+                siniva = mensaje
+                precio_v = mensaje 
+            elif float(i[precio]) > base_iva:
+                iva = locale.currency(float(i[precio]) * 0.19, grouping=True).replace(' ','')
+                siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
+                precio_v = locale.currency(float(i[precio]) * 1.19 + sim *1.19, grouping=True).replace(' ','')
+            else:
+                iva = 0
+                siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
+                precio_v = locale.currency(float(i[precio])  + sim *1.19, grouping=True).replace(' ','')
+            tem_data = {
+                'equipo': i['equipo'],
+                'precio simcard': locale.currency(sim, grouping=True).replace(' ',''),
+                'IVA simcard': locale.currency(sim*0.19, grouping=True).replace(' ',''),
+                'equipo sin IVA': siniva,
+                'IVA equipo': iva,
+                'total': precio_v,
+            }
+            new_data.append(tem_data)
+
+        return Response({'data' : new_data})
 
 class UpdatePrices:
 
