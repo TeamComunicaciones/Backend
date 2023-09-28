@@ -11,3 +11,15 @@ class Traducciones(models.Model):
 
     def __str__(self) -> str:
         return self.equipo
+    
+class Permisos(models.Model):
+    permiso = models.CharField(max_length=255, unique=True)
+    active = models.BooleanField()
+
+class Permisos_usuarios(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    permiso = models.ForeignKey(Permisos, on_delete=models.CASCADE)
+    tiene_permiso = models.BooleanField()
+
+    class Meta:
+        unique_together = ('user', 'permiso')
