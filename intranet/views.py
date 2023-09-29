@@ -356,37 +356,40 @@ def lista_productos_prepago(requests):
         return Response({'data' : precios})
     
     if requests.method == 'POST':
-        data = requests.data['data']
-        precio = requests.data['precio']
-        new_data = []
-        locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
-        base_iva = 100000
-        mensaje = 'no aplica'
-        for i in data:
-            sim = 2000
-            if float(i[precio]) > 100000000:
-                iva = mensaje
-                siniva = mensaje
-                precio_v = mensaje 
-            elif float(i[precio]) > base_iva:
-                iva = locale.currency(float(i[precio]) * 0.19, grouping=True).replace(' ','')
-                siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
-                precio_v = locale.currency(float(i[precio]) * 1.19 + sim *1.19, grouping=True).replace(' ','')
-            else:
-                iva = 0
-                siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
-                precio_v = locale.currency(float(i[precio])  + sim *1.19, grouping=True).replace(' ','')
-            tem_data = {
-                'equipo': i['equipo'],
-                'precio simcard': locale.currency(sim, grouping=True).replace(' ',''),
-                'IVA simcard': locale.currency(sim*0.19, grouping=True).replace(' ',''),
-                'equipo sin IVA': siniva,
-                'IVA equipo': iva,
-                'total': precio_v,
-            }
-            new_data.append(tem_data)
+        try:
+            data = requests.data['data']
+            precio = requests.data['precio']
+            new_data = []
+            locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
+            base_iva = 100000
+            mensaje = 'no aplica'
+            for i in data:
+                sim = 2000
+                if float(i[precio]) > 100000000:
+                    iva = mensaje
+                    siniva = mensaje
+                    precio_v = mensaje 
+                elif float(i[precio]) > base_iva:
+                    iva = locale.currency(float(i[precio]) * 0.19, grouping=True).replace(' ','')
+                    siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
+                    precio_v = locale.currency(float(i[precio]) * 1.19 + sim *1.19, grouping=True).replace(' ','')
+                else:
+                    iva = 0
+                    siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
+                    precio_v = locale.currency(float(i[precio])  + sim *1.19, grouping=True).replace(' ','')
+                tem_data = {
+                    'equipo': i['equipo'],
+                    'precio simcard': locale.currency(sim, grouping=True).replace(' ',''),
+                    'IVA simcard': locale.currency(sim*0.19, grouping=True).replace(' ',''),
+                    'equipo sin IVA': siniva,
+                    'IVA equipo': iva,
+                    'total': precio_v,
+                }
+                new_data.append(tem_data)
 
-        return Response({'data' : new_data})
+            return Response({'data' : new_data})
+        except Exception as e:
+            return AuthenticationFailed(e)
 
 class UpdatePrices:
 
