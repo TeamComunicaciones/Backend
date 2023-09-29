@@ -365,7 +365,7 @@ def lista_productos_prepago(requests):
             mensaje = 'no aplica'
             for i in data:
                 sim = 2000
-                if float(i[precio]) > 100000000:
+                if float(i[precio]) == 999999999:
                     iva = mensaje
                     siniva = mensaje
                     precio_v = mensaje 
