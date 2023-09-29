@@ -365,27 +365,22 @@ def lista_productos_prepago(requests):
             mensaje = 'no aplica'
             for i in data:
                 sim = 2000
-                iva = float(i[precio]) * 0.19
-                siniva = float(i[precio])
-                precio_v = float(i[precio]) * 1.19 + sim *1.19
-                # if float(i[precio]) > 100000000:
-                #     iva = mensaje
-                #     siniva = mensaje
-                #     precio_v = mensaje 
-                # elif float(i[precio]) > base_iva:
-                #     iva = locale.currency(float(i[precio]) * 0.19, grouping=True).replace(' ','')
-                #     siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
-                #     precio_v = locale.currency(float(i[precio]) * 1.19 + sim *1.19, grouping=True).replace(' ','')
-                # else:
-                #     iva = 0
-                #     siniva = locale.currency(float(i[precio]), grouping=True).replace(' ','')
-                #     precio_v = locale.currency(float(i[precio])  + sim *1.19, grouping=True).replace(' ','')
+                if float(i[precio]) > 100000000:
+                    iva = mensaje
+                    siniva = mensaje
+                    precio_v = mensaje 
+                elif float(i[precio]) > base_iva:
+                    iva = '${:,.2f}'.format(float(i[precio]) * 0.19)
+                    siniva = '${:,.2f}'.format(float(i[precio]))
+                    siniva = '${:,.2f}'.format(float(i[precio]) * 1.19 + sim *1.19)
+                else:
+                    iva = 0
+                    siniva = '${:,.2f}'.format(float(i[precio]))
+                    precio_v = '${:,.2f}'.format(float(i[precio]) + sim *1.19)
                 tem_data = {
                     'equipo': i['equipo'],
-                    # 'precio simcard': locale.currency(sim, grouping=True).replace(' ',''),
-                    'precio simcard': sim,
-                    # 'IVA simcard': locale.currency(sim*0.19, grouping=True).replace(' ',''),
-                    'IVA simcard': sim*0.19,
+                    'precio simcard': '${:,.2f}'.format(sim),
+                    'IVA simcard': '${:,.2f}'.format(sim * 0.19),
                     'equipo sin IVA': siniva,
                     'IVA equipo': iva,
                     'total': precio_v,
