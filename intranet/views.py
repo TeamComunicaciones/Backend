@@ -372,7 +372,7 @@ def lista_productos_prepago(requests):
                 elif float(i[precio]) > base_iva:
                     iva = '${:,.2f}'.format(float(i[precio]) * 0.19)
                     siniva = '${:,.2f}'.format(float(i[precio]))
-                    siniva = '${:,.2f}'.format(float(i[precio]) * 1.19 + sim *1.19)
+                    precio_v = '${:,.2f}'.format(float(i[precio]) * 1.19 + sim *1.19)
                 else:
                     iva = 0
                     siniva = '${:,.2f}'.format(float(i[precio]))
