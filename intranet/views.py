@@ -26,7 +26,7 @@ def shopify_token(request):
     shop = 'quickstart-06207d6f.myshopify.com'
     nonce = random.random() 
     url = "https://{}/admin/oauth/authorize?client_id={}&scope={}&redirect_uri={}&state={}&grant_options[]=offline-access".format(shop, api_key,  scopes, redirect_uri, nonce)
-    redirect(url)
+    return redirect(url)
 
 def shopify_return(request):
     code = request.GET
