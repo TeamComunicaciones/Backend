@@ -22,7 +22,7 @@ def shopify_token(request):
     api_key = 'd37d57aff7101337661ae6594f0f38d5'	#Set Partner app api key
     api_secret = '3ec5b155828a868687ef85444f88601f' #Set Partner app api secret
     scopes = 'write_products,read_content,read_discounts,read_locales'
-    redirect_uri = 'https://api.teamcomunicaciones.com.co/api/v1.0/shopify-return/'
+    redirect_uri = 'https://api.teamcomunicaciones.com.co/api/v1.0/shopify-return'
     shop = 'quickstart-06207d6f.myshopify.com'
     nonce = random.random() 
     url = "https://{}/admin/oauth/authorize?client_id={}&scope={}&redirect_uri={}&state={}&grant_options[]=offline-access".format(shop, api_key,  scopes, redirect_uri, nonce)
