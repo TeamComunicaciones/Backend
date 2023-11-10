@@ -28,6 +28,7 @@ def shopify_token(request):
     url = "https://{}/admin/oauth/authorize?client_id={}&scope={}&redirect_uri={}&state={}&grant_options[]=offline-access".format(shop, api_key,  scopes, redirect_uri, nonce)
     return redirect(url)
 
+@api_view(['GET'])
 def shopify_return(request):
     code = request.GET.get('code', '')
     return Response({"message":code})
