@@ -29,11 +29,13 @@ ALLOWED_HOSTS = [
     "teamcomunicaciones.com.co",
     "api.teamcomunicaciones.com.co",
     "localhost",
+    "https://admin.shopify.com/",
 ]
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOWED_ORIGINS = [
     "https://api.teamcomunicaciones.com.co",
     "https://teamcomunicaciones.com.co",
+    "https://admin.shopify.com/",
 ]
 
 

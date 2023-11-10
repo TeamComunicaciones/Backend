@@ -12,7 +12,7 @@ import jwt, datetime
 import json
 import pandas as pd
 from decimal import Decimal
-import random
+import random, requests
 # import locale
 
 
@@ -30,8 +30,16 @@ def shopify_token(request):
 
 @api_view(['GET'])
 def shopify_return(request):
+    api_key = '***REMOVED-SHOPIFY_API_KEY***'	#Set Partner app api key
+    api_secret = '***REMOVED-SHOPIFY_API_SECRET***' #Set Partner app api secret
     code = request.GET.get('code', '')
-    return Response({"message":code})
+    shop = request.GET.get('shop', '')
+    url = 'https://{}/admin/oauth/access_token'.format(shop)
+    myobj = {'client_id': api_key,'client_secret': api_secret,'code': code}
+
+    x = requests.post(url, data = myobj)
+    respuesta = x.json()['access_token']
+    return Response({"message":respuesta, "code":code})
     
 
 @api_view(['GET', 'POST', 'OPTIONS'])
