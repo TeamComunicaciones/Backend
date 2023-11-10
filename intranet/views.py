@@ -29,7 +29,7 @@ def shopify_token(request):
     return redirect(url)
 
 def shopify_return(request):
-    code = request.GET
+    code = request.GET.get('code', '')
     return Response({"message":code})
     
 
