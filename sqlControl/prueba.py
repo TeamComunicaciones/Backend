@@ -27,6 +27,13 @@
 
 # conn.close()
 
-numero = 1973000
-numero = '${:,.2f}'.format(numero)
-print(numero)
+# Variable en formato de cadena
+cadena_con_formato = '${:,.2f}'.format(150000)
+
+# Elimina el símbolo '$' y las comas, luego convierte a un valor numérico
+valor_numerico = float(cadena_con_formato.replace('$', '').replace(',', ''))
+resultado = valor_numerico + 200000
+resultado_formateado = '${:,.2f}'.format(resultado)
+
+# Imprime el resultado formateado
+print(resultado_formateado)

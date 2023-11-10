@@ -9,6 +9,8 @@ router = routers.SimpleRouter()
 
 urlpatterns = [
     path('', include(router.urls)),
+    path('shopify-return', views.shopify_return),
+    path('shopify', views.shopify_token),
     path('login', views.login),
     path('user-validate', views.user_validate),
     path('user-permissions', views.user_permissions),

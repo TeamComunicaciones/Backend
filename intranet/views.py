@@ -4,7 +4,7 @@ from rest_framework.decorators import api_view
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from rest_framework.response import Response
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.contrib.auth import login, authenticate
 from sqlControl.sqlControl import Sql_conexion
 from . import models
@@ -12,7 +12,26 @@ import jwt, datetime
 import json
 import pandas as pd
 from decimal import Decimal
+import random
 # import locale
+
+
+
+
+def shopify_token(request):
+    api_key = 'd37d57aff7101337661ae6594f0f38d5'	#Set Partner app api key
+    api_secret = '3ec5b155828a868687ef85444f88601f' #Set Partner app api secret
+    scopes = 'write_products,read_content,read_discounts,read_locales'
+    redirect_uri = 'https://api.teamcomunicaciones.com.co/api/v1.0/shopify-return/'
+    shop = 'quickstart-06207d6f.myshopify.com'
+    nonce = random.random() 
+    url = "https://{}/admin/oauth/authorize?client_id={}&scope={}&redirect_uri={}&state={}&grant_options[]=offline-access".format(shop, api_key,  scopes, redirect_uri, nonce)
+    redirect(url)
+
+def shopify_return(request):
+    code = request.GET
+    return Response({"message":code})
+    
 
 @api_view(['GET', 'POST', 'OPTIONS'])
 def login(request):
@@ -363,8 +382,10 @@ def lista_productos_prepago(requests):
             # locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
             base_iva = 100000
             mensaje = 'no aplica'
+            sim = 2000
+            simzc = 20000
+
             for i in data:
-                sim = 2000
                 if float(i[precio]) == 999999999:
                     iva = mensaje
                     siniva = mensaje
@@ -385,6 +406,22 @@ def lista_productos_prepago(requests):
                     'IVA equipo': iva,
                     'total': precio_v,
                 }
+                if 'Sistecredito Sin Iva':
+                    if tem_data['total'] != mensaje:
+                        tem_data['Tramites Kit'] = '${:,.2f}'.format(0)
+                        tem_data['Precio Sim Zc'] = '${:,.2f}'.format(simzc /1.19)
+                        tem_data['IVA Sim Zc'] = '${:,.2f}'.format(simzc /1.19 * 0.19)
+                        total_temp = float(tem_data['total'].replace('$', '').replace(',', ''))
+                        tramites_temp = float(tem_data['Tramites Kit'].replace('$', '').replace(',', ''))
+                        preciosim_temp = float(tem_data['Precio Sim Zc'].replace('$', '').replace(',', ''))
+                        ivasim_temp = float(tem_data['IVA Sim Zc'].replace('$', '').replace(',', ''))
+                        resultado = total_temp + tramites_temp + preciosim_temp + ivasim_temp
+                        tem_data['total'] = '${:,.2f}'.format(resultado)
+                    else:
+                        tem_data['Tramites Kit'] = mensaje
+                        tem_data['Precio Sim Zc'] = mensaje
+                        tem_data['IVA Sim Zc'] = mensaje
+
                 new_data.append(tem_data)
 
             return Response({'data' : new_data})
