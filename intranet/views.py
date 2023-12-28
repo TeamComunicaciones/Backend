@@ -1,4 +1,6 @@
 from rest_framework.exceptions import AuthenticationFailed
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 from django.contrib.auth.models import User
 from rest_framework.decorators import api_view
 from django.db.models.signals import pre_save
@@ -12,10 +14,195 @@ import jwt, datetime
 import json
 import pandas as pd
 from decimal import Decimal
-import random, requests
+import random
+import requests
+import os
+import shutil
+import uuid
 # import locale
 
 
+ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def contactanos(request):
+    nombre = request.data['nombre']
+    correo = request.data['correo']
+    asunto = request.data['asunto']
+    mensaje = request.data['mensaje']
+    models.Contactanos.objects.create(
+        nombre = nombre,
+        correo = correo,
+        asunto = asunto,
+        mensaje = mensaje,
+    )
+    return Response({'data':'data'})
+
+@api_view(['POST'])
+def informes(request):
+    start = request.data['start']
+    end = request.data['end']
+    arrowup='\u25B2'
+    arrowdown = '\u25BC'
+    fecha_inicio_2023 = datetime.datetime(int(start[0:4]), int(start[5:7]), int(start[8:10]))
+    fecha_fin_2023 = datetime.datetime(int(end[0:4]), int(end[5:7]), int(end[8:10]), 23, 59, 59)
+    fecha_inicio_2023_sql = fecha_inicio_2023.strftime('%Y-%m-%d %H:%M:%S')
+    fecha_fin_2023_sql = fecha_fin_2023.strftime('%Y-%m-%d %H:%M:%S')
+    query = (
+        f"SELECT Fac.Numero, Fac.Fecha, Ter.Identificacion,  "
+        f"ValorBruto, ValorIva, ValorDescuento, ValorFlete, "
+        f"ReteFuente, ReteIca, ReteIva, OtroImp1, OtroImp2, "
+        f"ValorNeto, Ubi.Nombre "
+        f"FROM dbo.Facturas Fac "
+        f"JOIN dbo.Terceros Ter ON Fac.Tercero = Ter.Codigo "
+        f"JOIN dbo.Ubicaciones Ubi ON Fac.Ubicacion = Ubi.Codigo "
+        f"WHERE Fecha >= '{fecha_inicio_2023_sql}' AND Fecha <= '{fecha_fin_2023_sql}'"
+    )
+    conexion = Sql_conexion(query)
+    rows = conexion.get_data()
+    columns = [column[0] for column in conexion.description]
+    print(columns)
+    columns[len(columns)-1] = 'Ubicacion'
+    # columns.append('Ubicacion')
+    df = pd.DataFrame.from_records(rows, columns=columns)
+    periodo = 'mes' if (fecha_fin_2023 - fecha_inicio_2023).days > 31 else 'dia'
+    if periodo == 'mes':
+        df['Fecha'] = df['Fecha'].dt.strftime('%Y-%m')
+    if periodo == 'dia':
+        df['Fecha'] = df['Fecha'].dt.strftime('%Y-%m-%d')
+    ventasPeriodo = df[['ValorNeto', 'Fecha']].groupby('Fecha').sum().reset_index()
+    print(fecha_inicio_2023_sql)
+    print(fecha_fin_2023_sql)
+    median = ventasPeriodo['ValorNeto'][:-1].median()
+    ultimoValor = float(ventasPeriodo['ValorNeto'].iloc[-1])
+    periodo = (ventasPeriodo['Fecha'].iloc[-1])
+    delta = round((ultimoValor- median) / median * 100, 2)
+    if delta > 0:
+        arrow = arrowup
+        color = '#c0ca33'
+    else:
+        arrow = arrowdown
+        delta = delta * -1
+        color = '#f4511e'
+    delta = f'{arrow}{delta}%'
+    ultimoValor = f'${formating_numbers(ultimoValor)}'
+    label = ventasPeriodo['Fecha'].tolist()
+    values = ventasPeriodo['ValorNeto'].tolist()
+
+    ubicaciones = df[['ValorNeto', 'Ubicacion']].groupby('Ubicacion').sum().reset_index()
+    labelPie = ubicaciones['Ubicacion'].tolist()
+    valuesPie = ubicaciones['ValorNeto'].tolist()
+    cantidadPie = len(ubicaciones)
+
+    query2 =(
+        f"SELECT Pro.Nombre, Df.Cantidad, Df.PrecioVenta "
+        f"FROM dbo.DetallesXFacturas Df "
+        f"JOIN dbo.Facturas Fac ON Df.Factura = Fac.Codigo "
+        f"JOIN dbo.Productos Pro ON Df.Producto = Pro.Codigo "
+        f"WHERE Fac.Fecha >= '{fecha_inicio_2023_sql}' AND Fac.Fecha <= '{fecha_fin_2023_sql}'"
+    )
+
+    conexion = Sql_conexion(query2)
+    columns = [column[0] for column in conexion.description]
+    rows = conexion.get_data()
+    df = pd.DataFrame.from_records(rows, columns=columns)
+    productos = df[['Nombre', 'Cantidad', 'PrecioVenta']].groupby('Nombre').sum().reset_index()
+    productos = productos.sort_values(by='Cantidad', ascending=False)
+    productos = productos.head(5)
+    productos['PrecioVenta'] = productos['PrecioVenta'].astype(float)
+    listaProductos = productos.to_dict(orient='records')
+
+
+    data = {
+        'median': str(median),
+        'ultimoValor': str(ultimoValor),
+        'delta': str(delta),
+        'periodo': periodo,
+        'color': color,
+        'label': label,
+        'values': values,
+        'productos': listaProductos,
+        'labelPie': labelPie,
+        'valuesPie' : valuesPie,
+        'cantidadPie': cantidadPie,
+    }
+    print(data)
+
+    return Response(data)
+
+@api_view(['GET'])
+def tienda(request):
+    plan = models.Imagenes.objects.all()
+    data = []
+    for i in plan:
+        print(i.id)
+        data.append({
+            'id':i.id, 
+            'img':i.url, 
+            'titulo':i.titulo, 
+            'detalle':i.detalle, 
+            'precio':i.precio,
+            'marca':i.marca,
+            })
+    return Response({'data':data})
+
+@api_view(['GET'])
+def productos(request):
+    plan = models.Imagenes.objects.filter(carpeta='productos')
+    data = []
+    for i in plan:
+        print(i.id)
+        data.append({'id':i.id, 'img':i.url, 'titulo':i.titulo, 'detalle':i.detalle, 'precio':i.precio})
+    return Response({'data':data})
+
+@api_view(['GET'])
+def planes(request):
+    plan = models.Imagenes.objects.filter(carpeta='planes')
+    data = []
+    for i in plan:
+        print(i.id)
+        data.append({'id':i.id, 'img':i.url, 'titulo':i.titulo, 'detalle':i.detalle, 'precio':i.precio})
+    return Response({'data':data})
+
+@api_view(['POST'])
+def cargarImagen(request):
+    nombre = str(uuid.uuid4()) +'.png'
+    titulo = request.POST.get('titulo')
+    detalle = request.POST.get('detalle')
+    precio = request.POST.get('valor')
+    imagen = request.FILES.get('imagen')
+    carpeta = request.POST.get('carpeta')
+    print(type(imagen))
+    ruta_carpeta_destino = ''
+    ruta_carpeta_destino2 = ruta + '\\'+carpeta+'\\'
+    if not default_storage.exists(ruta_carpeta_destino):
+        default_storage.makedirs(ruta_carpeta_destino)
+    nueva_ruta_imagen = default_storage.path(os.path.join(ruta_carpeta_destino, nombre))
+    with default_storage.open(nueva_ruta_imagen, 'wb') as destino:
+        destino.write(imagen.read())
+    ruta_carpeta_destino = os.path.join(ruta_carpeta_destino, nombre)
+    shutil.move(ruta_carpeta_destino, ruta_carpeta_destino2)
+    models.Imagenes.objects.create(
+        url = nombre,
+        titulo = titulo,
+        detalle = detalle,
+        precio = precio,
+        carpeta = carpeta,
+    )
+
+    return Response({'data':'d'})
+
+@api_view(['POST'])
+def deleteImagen(request):
+    id = request.data['id']
+    objeto = models.Imagenes.objects.get(id=id)
+    nombre = objeto.url
+    carpeta = request.data['carpeta']
+    ruta_carpeta_destino = ruta + '\\'+carpeta+'\\'
+    objeto.delete()
+    ruta_eliminar = os.path.join(ruta_carpeta_destino, nombre)
+    os.remove(ruta_eliminar)
+    return Response({'data':'d'})
 
 
 def shopify_token(request):
@@ -39,7 +226,7 @@ def shopify_return(request):
 
     x = requests.post(url, data = myobj)
     respuesta = x.json()['access_token']
-    return Response({"message":respuesta, "code":code})
+    return Response({"message":respuesta, "code": code})
     
 
 @api_view(['GET', 'POST', 'OPTIONS'])
@@ -108,7 +295,7 @@ def user_permissions(request):
             )
             
             # new_permiso = models.Permisos.objects.create(
-            #     permiso ='comercial',
+            #     permiso ='informes',
             #     active=True
             # )
             # new_permiso.save()
@@ -117,6 +304,9 @@ def user_permissions(request):
                 'superadmin' : usuario.is_superuser,
                 'administrador' : {
                     'main': False,
+                },
+                'informes':{
+                    'main':False,
                 },
                 'control_interno' : {
                     'main': False,
@@ -149,6 +339,11 @@ def user_permissions(request):
 @api_view(['POST'])
 def permissions(request):
     if request.method == 'POST':
+        # new_permiso = models.Permisos.objects.create(
+        #         permiso ='informes',
+        #         active=True
+        #     )
+        # new_permiso.save()
         response = Response()
         response.set_cookie(key='jwts', value='hhh', httponly=True)
         data = request.body
@@ -164,6 +359,7 @@ def permissions(request):
             usuarios = list(User.objects.all())
             data = []
             for i in usuarios:
+                administrador = models.Permisos_usuarios.objects.filter(user=i.id, permiso=1)
                 control_interno = models.Permisos_usuarios.objects.filter(user=i.id, permiso=2)
                 gestion_humana = models.Permisos_usuarios.objects.filter(user=i.id, permiso=3)
                 contabilidad = models.Permisos_usuarios.objects.filter(user=i.id, permiso=4)
@@ -171,8 +367,11 @@ def permissions(request):
                 soporte = models.Permisos_usuarios.objects.filter(user=i.id, permiso=6)
                 auditoria = models.Permisos_usuarios.objects.filter(user=i.id, permiso=7)
                 comercial = models.Permisos_usuarios.objects.filter(user=i.id, permiso=8)
+                informes= models.Permisos_usuarios.objects.filter(user=i.id, permiso=9)
                 data.append({
                     'usuario': i.username,
+                    'administrador': administrador[0].tiene_permiso if len(administrador)>0 else False,
+                    'informes': informes[0].tiene_permiso if len(informes) >0 else False,
                     'control_interno': control_interno[0].tiene_permiso if len(control_interno)>0 else False,
                     'gestion_humana': gestion_humana[0].tiene_permiso if len(gestion_humana)>0 else False,
                     'contabilidad': contabilidad[0].tiene_permiso if len(contabilidad)>0 else False,
@@ -770,3 +969,17 @@ class UpdatePrices:
             ],
             self.fintechOficinasTeamConIva,
         ]
+
+def formating_numbers(number, type_value=''):
+    if type_value != 'Money':
+        if number >= 1000000000:
+            formated_number = str(round(number/1000000000, 2)) + 'B'
+        elif number >= 1000000:
+            formated_number = str(round(number/1000000, 2)) + 'M'
+        elif number >= 1000:
+            formated_number = str(round(number/1000, 2)) + 'K'
+        else:
+            formated_number = str(round(number, 2))
+    else:
+        formated_number = str(f'{number:,.2f}')
+    return formated_number
