@@ -26,7 +26,9 @@ class Sql_conexion:
         # self.conn.setencoding('latin-1')
         # self.data = pd.read_sql_query(self.query, self.conn)
         self.cursor.execute(self.query)
+        self.description = self.cursor.description
         self.data = self.cursor.fetchall()
+        self.conn.close()
     
     def get_data(self):
         return self.data

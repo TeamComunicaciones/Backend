@@ -23,3 +23,18 @@ class Permisos_usuarios(models.Model):
 
     class Meta:
         unique_together = ('user', 'permiso')
+
+class Imagenes(models.Model):
+    url = models.CharField(max_length=255, unique=True, null=True)
+    titulo = models.CharField(max_length=255, null=True)
+    detalle = models.CharField(max_length=255, null=True)
+    precio = models.CharField(max_length=255, null=True)
+    carpeta = models.CharField(max_length=255, null=True)
+    marca = models.CharField(max_length=255, null=True)
+
+class Contactanos(models.Model):
+    nombre = models.CharField(max_length=255, null=True)
+    correo = models.CharField(max_length=255, null=True)
+    asunto = models.CharField(max_length=255, null=True)
+    mensaje = models.TextField(null=True)
+
