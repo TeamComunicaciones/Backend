@@ -38,3 +38,29 @@ class Contactanos(models.Model):
     asunto = models.CharField(max_length=255, null=True)
     mensaje = models.TextField(null=True)
 
+class Formula(models.Model):
+    nombre = models.CharField(max_length=255, unique=True)
+    formula = models.TextField(null=True)
+    fecha = models.DateTimeField(auto_now=True)
+    usuario = models.ForeignKey(User, on_delete=models.CASCADE) 
+
+    def __str__(self):
+        return self.nombre
+
+class Lista_precio(models.Model):
+    producto = models.CharField(max_length=100, null=True)  # Ajusta la longitud según tus necesidades
+    nombre = models.CharField(max_length=100, null=True)    # Ajusta la longitud según tus necesidades
+    valor = models.DecimalField(max_digits=10, decimal_places=2)  # Ajusta según tus necesidades
+    dia = models.DateTimeField(auto_now_add=True, null=True)
+
+class Permisos_precio(models.Model):
+    permiso = models.CharField(max_length=255, unique=True)
+    active = models.BooleanField()
+
+class Permisos_usuarios_precio(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    permiso = models.ForeignKey(Permisos_precio, on_delete=models.CASCADE)
+    tiene_permiso = models.BooleanField()
+
+    class Meta:
+        unique_together = ('user', 'permiso')
