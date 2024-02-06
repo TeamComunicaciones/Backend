@@ -20,6 +20,7 @@ urlpatterns = [
     path('translate-products-prepago', views.translate_products_prepago),
     path('translate-prepago', views.translate_prepago),
     path('lista-productos-prepago', views.lista_productos_prepago),
+    path('lista-productos-prepago-equipo', views.lista_productos_prepago_equipo),
     path('planes', views.planes),
     path('productos', views.productos),
     path('tienda', views.tienda),
@@ -27,4 +28,9 @@ urlpatterns = [
     path('deleteImagen', views.deleteImagen),
     path('informes', views.informes),
     path('contactanos', views.contactanos),
+    path('prueba-formula', views.prueba_formula),
+    path('guardar-formula', views.guardar_formula),
+    path('consultar-formula', views.consultar_formula),
+    path('guardar-precios', views.guardar_precios),
+    path('excel-precios', views.excel_precios),
 ]

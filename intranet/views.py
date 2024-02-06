@@ -19,10 +19,158 @@ import requests
 import os
 import shutil
 import uuid
+import ast
+from datetime import date
 # import locale
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def excel_precios(request):
+    sin_data = '999999999.00'
+    titulos = [
+        'Producto',
+        'Costo Actual',
+        'Precio Publico Sin Iva',
+        'Subdistribuidor Sin Iva',
+        'Addi',
+        'Cliente 0 A 5 Meses Sin Iva',
+        'Cliente 6 A 23 Meses Sin Iva',
+        'Cliente Mayor A 24 Meses Sin Iva',
+        'Cliente Descuento Kit Prepago Sin Iva',
+        'Sistecredito Sin Iva',
+        'Premium Sin Iva',
+        'Tramitar Sin Iva',
+        'People Sin Iva',
+        'Flamingo Sin Iva',
+        'Fintech Oficinas Team Y Externos Sin Iva',
+        'Fintech Zonificacion Subdistribuidores Y Externos Sin Iva',
+        'Oficina Movil Sin Iva',
+        'Cenestel',
+        ]
+    titulos_diccionario = {
+        'Producto': 'Equipo',
+        'Costo Actual': 'Costo',
+        'Precio Publico Sin Iva': 'Precio publico',
+        'Subdistribuidor Sin Iva': 'Precio sub',
+        'Addi': 'Precio Addi',
+        'Cliente 0 A 5 Meses Sin Iva': None,
+        'Cliente 6 A 23 Meses Sin Iva': None,
+        'Cliente Mayor A 24 Meses Sin Iva': None,
+        'Cliente Descuento Kit Prepago Sin Iva': 'Precio Cliente Kit Prepago',
+        'Sistecredito Sin Iva': None,
+        'Premium Sin Iva': 'Precio premium',
+        'Tramitar Sin Iva': None,
+        'People Sin Iva': None,
+        'Flamingo Sin Iva': 'Precio Flamingo',
+        'Fintech Oficinas Team Y Externos Sin Iva': 'Precio Fintech',
+        'Fintech Zonificacion Subdistribuidores Y Externos Sin Iva': None,
+        'Oficina Movil Sin Iva': None,
+        'Cenestel': None,
+    }
+    cabecera = request.data['cabecera']
+    for key, value in titulos_diccionario.items():
+        for i in cabecera:
+            if value == i['text']:
+                titulos_diccionario[key] = i['value']
+
+    data = [titulos]
+
+    items = request.data['items']
+    for precio in items:
+        temp_fila = []
+        for titulo in titulos:
+            if titulos_diccionario[titulo] is None:
+                temp_fila.append(sin_data)
+            else:
+                temp_fila.append(precio[int(titulos_diccionario[titulo])])
+        data.append(temp_fila)
+    
+    return Response({'excel':data})
+
+@api_view(['POST'])
+def guardar_precios(request):
+    cabecera = request.data['cabecera']
+    items = request.data['items']
+    
+    for precio in items:
+        for i in range(1,len(cabecera)):
+            producto = precio[0]
+            nombre = cabecera[i]['text']
+            valor = precio[i]
+            models.Lista_precio.objects.create(
+                producto= producto,
+                nombre = nombre,
+                valor = valor
+            )
+            
+    return Response({'data':'data'})
+
+
+@api_view(['POST'])
+def consultar_formula(request):
+    nombre = request.data['nombre']
+    print(nombre)
+    consulta = models.Formula.objects.filter(nombre=nombre).first()
+    formula = consulta.formula
+    formula_lista = ast.literal_eval(formula)
+    print(consulta.formula)
+    # formula_lista = []
+    return Response({'formula':formula_lista})
+
+
+
+
+@api_view(['POST'])
+def guardar_formula(request):
+    formula = request.data['funtion']
+    nombre = request.data['nombre']
+    texto = str(formula)
+    token = request.data['jwt']
+    try:
+        payload = jwt.decode(token, 'secret', algorithms='HS256')
+        usuario = User.objects.get(username=payload['id'])
+    except:
+        raise AuthenticationFailed('Error con usuario')
+    formula_obj, created = models.Formula.objects.get_or_create(
+        nombre=nombre,
+        defaults={
+            'formula': texto,
+            'usuario': usuario,
+        }
+    )
+
+    if not created:
+        # El objeto ya existía, actualiza los campos necesarios
+        formula_obj.formula = formula
+        formula_obj.usuario = usuario
+        formula_obj.save()
+
+    return Response({'data':''})
+
+
+@api_view(['POST'])
+def prueba_formula(request):
+    formula = request.data['funtion']
+    diccionario = request.data['dic']
+    nombre = request.data['nombre']
+    formula = ' '.join(formula)
+    variables = {k: float(v) for k, v in diccionario.items()}
+    consulta = models.Formula.objects.filter(nombre='Precio publico').first()
+    formula_publico = consulta.formula
+    formula_lista = ast.literal_eval(formula_publico)
+    formula2 = ' '.join(formula_lista)
+    formula = formula.replace('precioPublico',formula2)
+    formula = formula.replace('=','==')
+    formula = formula.replace('> ==','>=')
+    formula = formula.replace('< ==','<=')
+    resultado = eval(formula, variables)
+    print(formula)
+    print(diccionario)
+    print(resultado)
+    print(nombre)
+    return Response({'data':resultado})
 
 @api_view(['POST'])
 def contactanos(request):
@@ -484,6 +632,7 @@ def translate_products_prepago(request):
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
+        iva = 1035430
         # transnew = models.Traducciones.objects.create(
         #     equipo='equipoejemplo',
         #     stok='stokejemplo',
@@ -505,13 +654,10 @@ def translate_prepago(requests):
         df_equipos = pd.DataFrame(data)
         df_equipos.columns = [
             'equipo',
-            'con iva', 
+            'valor', 
             'descuento', 
-            '-iva +descuento',
-            'total',
-            'descuento agente',
-            'precio -iva',
-            'precio +iva'
+            'costo',
+            'precioConIva',
         ]
         equipos_origen = df_equipos[df_equipos.columns[0]]
         equipos_translate = df_translates['equipo']
@@ -520,121 +666,210 @@ def translate_prepago(requests):
         if len(equipos_no_encontrados) > 0:
             validate = False
             data = equipos_no_encontrados.to_list()
+            cabecera = []
         else:
             validate = True
             nuevo_df = df_equipos.merge(df_translates, on='equipo', how='left')
             nuevo_df = nuevo_df.drop_duplicates()
             data =[]
+            precios = models.Formula.objects.all()
+            cabecera = [{'text':'Equipo', 'value':'0'}]
+            contador = 1
+            for i in precios:
+                cabecera.append({'text':i.nombre, 'value':str(contador)})
+                contador += 1
+                if 'Precio Fintech' in i.nombre:
+                    cabecera.append({'text':'Kit Fintech', 'value':str(contador)})
+                    contador += 1
+                elif 'Precio Addi' in i.nombre:
+                    cabecera.append({'text':'Kit Addi', 'value':str(contador)})
+                    contador += 1
+                elif 'Precio sub' in i.nombre:
+                    cabecera.append({'text':'Kit Sub', 'value':str(contador)})
+                    contador += 1
+            cabecera.append({'text':'descuento', 'value':str(contador)})
+            lista_produtos = []
             for index, row in nuevo_df.iterrows():
-                update_price = UpdatePrices(
-                    row['stok'],
-                    row['con iva'],
-                    row['descuento'],
-                    row['-iva +descuento'],
-                    row['total'],
-                    row['descuento agente'],
-                    row['precio -iva'],
-                    row['precio +iva'],
-                    row['iva']
-                )
-                itemData = update_price.returnData()
-                data.append(itemData[0])
-            
-        return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto})
-    
-@api_view(['GET', 'POST'])
-def lista_productos_prepago(requests):
-    if requests.method == 'GET':
-        query = (
-            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "  
-            "FROM dbo.ldpProductosXAsociaciones lProd " 
-            "JOIN dbo.ldpListadePrecios  lPre ON lProd.ListaDePrecios = lPre.Codigo " 
-            "JOIN dbo.Productos  P ON lProd.Producto = P.Codigo " 
-            "JOIN dbo.TiposDeProducto  TP ON P.TipoDeProducto = TP.Codigo " 
-            # f"WHERE P.Visible = 1;"
-            f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1;"
-        )
-        conexion = Sql_conexion(query)
-        data2 = conexion.get_data()
-        equipo = []
-        precio = []
-        valor = []
-        for i in data2:
-            if i[0] != '.':
-                equipo.append(i[0])
-                precio.append(i[1])
-                valor.append("{:.2f}".format(i[2].quantize(Decimal('0.00'))))
-        data = {
-            'equipo': equipo,
-            'precio': precio,
-            'valor': valor,
-        }
-        df = pd.DataFrame(data)
-        # Pivota los datos
-        pivot_df = df.pivot(index='equipo', columns='precio', values='valor').reset_index()
-
-        # Reinicia el índice
-        pivot_df.reset_index(drop=True, inplace=True)
-
-        # Cambia el nombre de las columnas resultantes
-        pivot_df.columns.name = None
-        pivot_df = pivot_df.fillna('0')
-        precios = pivot_df.to_dict(orient='records')
-        return Response({'data' : precios})
-    
+                if row['stok'] in lista_produtos:
+                    continue
+                lista_produtos.append(row['stok'])
+                temp_data =[row['stok']]
+                for precio in precios:
+                    dict_formula = ast.literal_eval(precio.formula)
+                    formula = ' '.join(dict_formula)
+                    consulta2 = models.Formula.objects.filter(nombre='Precio publico').first()
+                    formula_publico = consulta2.formula
+                    formula_lista = ast.literal_eval(formula_publico)
+                    formula2 = ' '.join(formula_lista)
+                    formula = formula.replace('precioPublico',formula2)
+                    formula = formula.replace('=','==')
+                    formula = formula.replace('> ==','>=')
+                    formula = formula.replace('< ==','<=')
+                    variables = {
+                        'valor':row['valor'],
+                        'costo':row['costo'],
+                        'descuento':row['descuento'],
+                        'iva': iva,
+                        'precioConIva': row['precioConIva']
+                    }
+                    kit = 0
+                    kit_comprobante = False
+                    resultado = eval(formula, variables)
+                    if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre:
+                        kit_comprobante = True
+                        if resultado >= iva and row['valor'] < iva:
+                            kit = resultado - 1032620
+                            resultado = 1032620
+                    elif 'Precio sub' in precio.nombre:
+                        kit_comprobante = True
+                        if resultado < iva and row['valor'] >= iva:
+                            kit = resultado * 0.19
+                    temp_data.append(resultado)
+                    if kit_comprobante:
+                        temp_data.append(kit)
+                temp_data.append(row['descuento'])
+                data.append(temp_data)
+            # print(cabecera)
+        return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
+@api_view(['PUT', 'POST'])
+def lista_productos_prepago_equipo(requests):
     if requests.method == 'POST':
-        try:
-            data = requests.data['data']
-            precio = requests.data['precio']
-            new_data = []
-            # locale.setlocale(locale.LC_ALL, 'es_CO.UTF-8')
-            base_iva = 100000
-            mensaje = 'no aplica'
-            sim = 2000
-            simzc = 20000
+        precio = requests.data['precio']
+        equipo = requests.data['equipo']
+        print(precio, equipo)
+        new_data = []
+        data = models.Lista_precio.objects.all()
+        df = pd.DataFrame(list(data.values()))
+        df['dia'] = pd.to_datetime(df['dia'])
+        df['valor'] = df['valor'].astype(float)
 
-            for i in data:
-                if float(i[precio]) == 999999999:
-                    iva = mensaje
-                    siniva = mensaje
-                    precio_v = mensaje 
-                elif float(i[precio]) > base_iva:
-                    iva = '${:,.2f}'.format(float(i[precio]) * 0.19)
-                    siniva = '${:,.2f}'.format(float(i[precio]))
-                    precio_v = '${:,.2f}'.format(float(i[precio]) * 1.19 + sim *1.19)
-                else:
-                    iva = 0
-                    siniva = '${:,.2f}'.format(float(i[precio]))
-                    precio_v = '${:,.2f}'.format(float(i[precio]) + sim *1.19)
+        df_resultado = df[(df['producto'] == equipo) & (df['nombre'] == precio)]
+       
+
+        for index, row in df_resultado.iterrows():
+           
+            tem_data = {
+                'equipo': row['producto'],
+                'valor sin iva': '${:,.2f}'.format(row['valor']),
+                'fecha': row['dia'],
+    
+            }
+            new_data.append(tem_data)
+        
+        print(new_data)
+
+        return Response({'data' : new_data})
+
+
+@api_view(['PUT', 'POST'])
+def lista_productos_prepago(requests):
+    if requests.method == 'PUT':
+        traduccion = {
+            'Precio publico':'Precio Publico',
+            'Precio sub':'Subdistribuidor',
+            'Precio premium':'Premium',
+            'Precio Fintech':'Fintech Zonificacion Subdistribuidores Y Externos',
+            'Precio Addi':'Addi',
+            'Precio Flamingo':'Flamingo',
+            'Costo':'Costo',
+        }
+        lista_precios = []
+        token = requests.data['jwt']
+        payload = jwt.decode(token, 'secret', algorithms='HS256')
+        usuario = User.objects.get(username=payload['id'])
+        listas = models.Permisos_usuarios_precio.objects.filter(user= usuario.id)
+        for i in listas:
+            permiso = i.permiso.permiso
+            print(permiso)
+            lista_precios.append({'id':permiso, 'nombre':traduccion[permiso]})
+        
+
+        return Response({'data' : lista_precios})
+    
+    if requests.method == 'POST':   
+        new_data = []
+        productos = []
+        precio = requests.data['precio']
+        print(precio)
+
+        data = models.Lista_precio.objects.all()
+        df = pd.DataFrame(list(data.values()))
+        df['dia'] = pd.to_datetime(df['dia'])
+        df['valor'] = df['valor'].astype(float)
+
+        df_descuentos = df[df['nombre'] == 'descuento']
+        df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
+
+        df_filtrado = df[df['nombre'] == precio]
+        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        
+        df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
+
+        df_kit_addi = df[df['nombre'] == 'Kit Addi']
+        df_kit_addi = df_kit_addi.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_addi = df_kit_addi.rename(columns={'valor': 'kit addi'})
+        df_resultado = pd.merge(df_resultado, df_kit_addi[['producto', 'kit addi']], on='producto', how='left')
+
+        df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
+        df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
+        df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
+
+
+        df_kit_sub = df[df['nombre'] == 'Kit Sub']
+        df_kit_sub = df_kit_sub.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_sub = df_kit_sub.rename(columns={'valor': 'kit sub'})
+        df_resultado = pd.merge(df_resultado, df_kit_sub[['producto', 'kit sub']], on='producto', how='left')
+
+        df_costo = df[df['nombre'] == 'Costo']
+        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_costo = df_costo.rename(columns={'valor': 'costo'})
+        df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
+
+
+        sim = 2000
+        base = 1035430
+
+        for index, row in df_resultado.iterrows():
+            if precio == 'Costo':
                 tem_data = {
-                    'equipo': i['equipo'],
+                    'equipo': row['producto'],
+                    'costo': '${:,.2f}'.format(row['costo']),
+                    'descuento': '${:,.2f}'.format(row['descuento']),
+                    'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
+                }
+                new_data.append(tem_data)
+            else:
+                valor = row['valor']
+                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
+                total = sim * 1.19 + valor + iva
+                tem_data = {
+                    'equipo': row['producto'],
                     'precio simcard': '${:,.2f}'.format(sim),
                     'IVA simcard': '${:,.2f}'.format(sim * 0.19),
-                    'equipo sin IVA': siniva,
-                    'IVA equipo': iva,
-                    'total': precio_v,
+                    'equipo sin IVA': '${:,.2f}'.format(valor),
+                    'IVA equipo': '${:,.2f}'.format(iva),
                 }
-                if 'Sistecredito Sin Iva':
-                    if tem_data['total'] != mensaje:
-                        tem_data['Tramites Kit'] = '${:,.2f}'.format(0)
-                        tem_data['Precio Sim Zc'] = '${:,.2f}'.format(simzc /1.19)
-                        tem_data['IVA Sim Zc'] = '${:,.2f}'.format(simzc /1.19 * 0.19)
-                        total_temp = float(tem_data['total'].replace('$', '').replace(',', ''))
-                        tramites_temp = float(tem_data['Tramites Kit'].replace('$', '').replace(',', ''))
-                        preciosim_temp = float(tem_data['Precio Sim Zc'].replace('$', '').replace(',', ''))
-                        ivasim_temp = float(tem_data['IVA Sim Zc'].replace('$', '').replace(',', ''))
-                        resultado = total_temp + tramites_temp + preciosim_temp + ivasim_temp
-                        tem_data['total'] = '${:,.2f}'.format(resultado)
-                    else:
-                        tem_data['Tramites Kit'] = mensaje
-                        tem_data['Precio Sim Zc'] = mensaje
-                        tem_data['IVA Sim Zc'] = mensaje
-
+                if precio == 'Precio sub':
+                    kit = row['kit sub']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Fintech':
+                    kit = row['kit fintech']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Addi':
+                    kit = row['kit addi']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                
+                tem_data['total'] = '${:,.2f}'.format(total)
+                if precio == 'Precio publico':
+                    tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
                 new_data.append(tem_data)
 
-            return Response({'data' : new_data})
-        except Exception as e:
-            return AuthenticationFailed(e)
+        return Response({'data' : new_data})
 
 class UpdatePrices:
 
