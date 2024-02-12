@@ -605,9 +605,9 @@ def translate_products_prepago(request):
             if nombreStok not in listaStok:
                 listaStok.append(nombreStok)
         for nstok in listaStok:
-            validacion = nstok == stok
+            validacion = nstok == stok[0]
             if validacion == False:
-                raise AuthenticationFailed(f'intente usar {nstok} y no {stok}')
+                raise AuthenticationFailed(f'intente usar {nstok} y no {stok[0]}')
         
         traduccion = models.Traducciones.objects.filter(equipo = request.data['equipo']).first()
 
@@ -790,42 +790,46 @@ def lista_productos_prepago(requests):
         new_data = []
         productos = []
         precio = requests.data['precio']
-        print(precio)
+        
 
         data = models.Lista_precio.objects.all()
         df = pd.DataFrame(list(data.values()))
         df['dia'] = pd.to_datetime(df['dia'])
         df['valor'] = df['valor'].astype(float)
+        
 
         df_descuentos = df[df['nombre'] == 'descuento']
         df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
         df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
 
         df_filtrado = df[df['nombre'] == precio]
-        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
         
+        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        
+
         df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
         df_kit_addi = df[df['nombre'] == 'Kit Addi']
-        df_kit_addi = df_kit_addi.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_addi = df_kit_addi.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_kit_addi = df_kit_addi.rename(columns={'valor': 'kit addi'})
         df_resultado = pd.merge(df_resultado, df_kit_addi[['producto', 'kit addi']], on='producto', how='left')
 
         df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
-        df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
         df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
 
 
         df_kit_sub = df[df['nombre'] == 'Kit Sub']
-        df_kit_sub = df_kit_sub.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_kit_sub = df_kit_sub.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_kit_sub = df_kit_sub.rename(columns={'valor': 'kit sub'})
         df_resultado = pd.merge(df_resultado, df_kit_sub[['producto', 'kit sub']], on='producto', how='left')
 
         df_costo = df[df['nombre'] == 'Costo']
-        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_costo = df_costo.rename(columns={'valor': 'costo'})
         df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
+        
 
 
         sim = 2000
