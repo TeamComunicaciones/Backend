@@ -387,13 +387,14 @@ def login(request):
             payload ={
                 'id': user.username,
                 'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes= 60),
-                'iat' : datetime.datetime.utcnow()
+                'iat' : datetime.datetime.utcnow(),
+                'change': True if password == 'Cambiame123' else False
             }
             token = jwt.encode(payload, 'secret', algorithm='HS256')
             response = Response()
             response.set_cookie(key='jwt', value=token, httponly=True)
             response.data = {
-                'jwt':token
+                'jwt':token,
             }
             return response
         else:
@@ -421,9 +422,10 @@ def user_validate(request):
             raise AuthenticationFailed('Debes estar logueado')
         try:
             payload = jwt.decode(token, 'secret', algorithms='HS256')
+            
         except jwt.ExpiredSignatureError:
             raise AuthenticationFailed('Debes estar logueado')
-        return Response({"message":'usuario valido'})
+        return Response({"cambioClave": False})
 
 @api_view(['POST'])
 def user_permissions(request):
@@ -437,6 +439,8 @@ def user_permissions(request):
             raise AuthenticationFailed('Debes estar logueado')
         try:
             payload = jwt.decode(token, 'secret', algorithms='HS256')
+            if payload['change']:
+                return Response({"cambioClave": True})
             usuario = User.objects.get(username=payload['id'])
             permisos_ind = models.Permisos_usuarios.objects.filter(
                 user= usuario
@@ -482,8 +486,31 @@ def user_permissions(request):
                 permisos[i.permiso.permiso]['main'] = i.tiene_permiso
         except jwt.ExpiredSignatureError:
             raise AuthenticationFailed('Debes estar logueado')
-        return Response({"permisos":permisos})
-    
+        return Response({"permisos":permisos, "cambioClave": False})
+
+@api_view(['POST'])
+def cambio_clave(request):
+    print('d')
+    if request.method == 'POST':
+        contraseña = request.data['password']
+        contraseña2 = request.data['retrypassword']
+        token = request.data['jwt']
+        if contraseña == contraseña2:
+            print(contraseña, contraseña2, token)
+            if not token:
+                raise AuthenticationFailed('Debes estar logueado')
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+                usuario = User.objects.get(username=payload['id'])
+            except jwt.ExpiredSignatureError:
+                raise AuthenticationFailed('Debes estar logueado')
+            
+            usuario.set_password(contraseña)
+            usuario.save()
+            return Response({"usuarios": ''})
+        else:
+            raise AuthenticationFailed('Las contraseñas deben ser iguales')
+
 @api_view(['POST'])
 def permissions(request):
     if request.method == 'POST':
@@ -1222,3 +1249,8 @@ def formating_numbers(number, type_value=''):
     else:
         formated_number = str(f'{number:,.2f}')
     return formated_number
+
+# def restablecerContraseña(id):
+#     usuario = User.objects.get(username=id)
+#     usuario.set_password('Cambiame123')
+#     usuario.save()

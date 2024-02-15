@@ -33,4 +33,5 @@ urlpatterns = [
     path('consultar-formula', views.consultar_formula),
     path('guardar-precios', views.guardar_precios),
     path('excel-precios', views.excel_precios),
+    path('cambio-clave', views.cambio_clave),
 ]
