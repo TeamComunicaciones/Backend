@@ -42,14 +42,14 @@ def calcular_comisiones(request):
             if convergencia == 'Convergente':
                 if tipo == 'CROSS SELLING' or tipo == 'NEW':
                     comision_valor = comisiones_dic['hfc new cross selling convergente']
-                if tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
+                elif tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
                     comision_valor = comisiones_dic['hfc up selling convergente']
                 else:
                     comision_valor = 0
             else:
                 if tipo == 'CROSS SELLING' or tipo == 'NEW':
                     comision_valor = comisiones_dic['hfc new cross selling no convergente']
-                if tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
+                elif tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
                     comision_valor = comisiones_dic['hfc up selling no convergente']
                 else:
                     comision_valor = 0
@@ -68,9 +68,9 @@ def calcular_comisiones(request):
             if convergencia == 'Convergente':
                 if cantidad == 1:
                     comision_valor = comisiones_dic['hfc sencillo red dth convergente']
-                if cantidad == 2:
+                elif cantidad == 2:
                     comision_valor = comisiones_dic['hfc doble hfc dth convergente']
-                if cantidad == 3:
+                elif cantidad == 3:
                     comision_valor = comisiones_dic['hfc triple hfc dth convergente']
                 else:
                     comision_valor = 0
@@ -78,9 +78,9 @@ def calcular_comisiones(request):
             else:
                 if cantidad == 1:
                     comision_valor = comisiones_dic['hfc sencillo red dth no convergente']
-                if cantidad == 2:
+                elif cantidad == 2:
                     comision_valor = comisiones_dic['hfc doble hfc dth no convergente']
-                if cantidad == 3:
+                elif cantidad == 3:
                     comision_valor = comisiones_dic['hfc triple hfc dth no convergente']
                 else:
                     comision_valor = 0
@@ -115,9 +115,9 @@ def calcular_comisiones(request):
         if red == 'FO':
             if velocidad == 'VEL_2':
                 comision_valor = comisiones_dic['servicios fo vel 2']
-            if velocidad == 'VEL_3':
+            elif velocidad == 'VEL_3':
                 comision_valor = comisiones_dic['servicios fo vel 3']
-            if velocidad == 'VEL_4':
+            elif velocidad == 'VEL_4':
                 comision_valor = comisiones_dic['servicios fo vel 4']
             else:
                 comision_valor = 0
@@ -163,9 +163,9 @@ def calcular_comisiones(request):
         if red == 'FO':
             if duracion == 24:
                 comision_valor = comisiones_dic['servicios fo 24 meses']
-            if duracion == 36:
+            elif duracion == 36:
                 comision_valor = comisiones_dic['servicios fo 36 meses']
-            if duracion >= 48:
+            elif duracion >= 48:
                 comision_valor = comisiones_dic['servicios fo 48 meses']
             else:
                 comision_valor = 0
