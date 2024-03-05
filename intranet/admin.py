@@ -4,3 +4,4 @@ from . import models
 # Register your models here.
 admin.site.register(models.Permisos_precio)
 admin.site.register(models.Permisos_usuarios_precio)
+admin.site.register(models.Porcentaje_comision)

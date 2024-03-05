@@ -64,3 +64,10 @@ class Permisos_usuarios_precio(models.Model):
 
     class Meta:
         unique_together = ('user', 'permiso')
+
+
+class Porcentaje_comision(models.Model):
+    nombre = models.CharField(max_length=255, unique=True)
+    valor = models.CharField(max_length=255)
+    def __str__(self):
+        return self.nombre

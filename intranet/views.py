@@ -13,6 +13,7 @@ from . import models
 import jwt, datetime
 import json
 import pandas as pd
+import numpy as np
 from decimal import Decimal
 import random
 import requests
@@ -25,6 +26,280 @@ from datetime import date
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def calcular_comisiones(request):
+    comisiones = models.Porcentaje_comision.objects.all()
+    comisiones_dic = {i.nombre:i.valor for i in comisiones}
+
+    def comision_servicios_hfc(row):
+        red = row['RED']
+        tipo = row['TIPO VENTA']
+        convergencia = row['CONVERGENCIA']
+        valor =row['TOTAL MENSUALIDAD']
+
+        if red == 'HFC':
+            if convergencia == 'Convergente':
+                if tipo == 'CROSS SELLING' or tipo == 'NEW':
+                    comision_valor = comisiones_dic['hfc new cross selling convergente']
+                if tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
+                    comision_valor = comisiones_dic['hfc up selling convergente']
+                else:
+                    comision_valor = 0
+            else:
+                if tipo == 'CROSS SELLING' or tipo == 'NEW':
+                    comision_valor = comisiones_dic['hfc new cross selling no convergente']
+                if tipo == 'UP SELLING/FO' or tipo == 'UP SELLING':
+                    comision_valor = comisiones_dic['hfc up selling no convergente']
+                else:
+                    comision_valor = 0
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        return resultado
+    
+    def aceleradores_hfc(row):
+        red = row['RED']
+        cantidad = row['cantidad']
+        convergencia = row['CONVERGENCIA']
+        valor =row['TOTAL MENSUALIDAD']
+        if red == 'HFC' or red=='DTH':
+            if convergencia == 'Convergente':
+                if cantidad == 1:
+                    comision_valor = comisiones_dic['hfc sencillo red dth convergente']
+                if cantidad == 2:
+                    comision_valor = comisiones_dic['hfc doble hfc dth convergente']
+                if cantidad == 3:
+                    comision_valor = comisiones_dic['hfc triple hfc dth convergente']
+                else:
+                    comision_valor = 0
+                
+            else:
+                if cantidad == 1:
+                    comision_valor = comisiones_dic['hfc sencillo red dth no convergente']
+                if cantidad == 2:
+                    comision_valor = comisiones_dic['hfc doble hfc dth no convergente']
+                if cantidad == 3:
+                    comision_valor = comisiones_dic['hfc triple hfc dth no convergente']
+                else:
+                    comision_valor = 0
+
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        return resultado
+    
+    def comision_servicios_fo(row):
+        red = row['RED']
+        convergencia = row['CONVERGENCIA']
+        valor =row['TOTAL MENSUALIDAD']
+
+        if red == 'FO':
+            if convergencia == 'Convergente':
+                comision_valor = comisiones_dic['servicios fo convergente']
+            else:
+                comision_valor = comisiones_dic['servicios fo no convergente']
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        return resultado
+    
+    def bono_velocidad_internet(row):
+        red = row['RED']
+        velocidad = row['VELOCIDAD']
+        valor =row['TOTAL MENSUALIDAD']
+
+        if red == 'FO':
+            if velocidad == 'VEL_2':
+                comision_valor = comisiones_dic['servicios fo vel 2']
+            if velocidad == 'VEL_3':
+                comision_valor = comisiones_dic['servicios fo vel 3']
+            if velocidad == 'VEL_4':
+                comision_valor = comisiones_dic['servicios fo vel 4']
+            else:
+                comision_valor = 0
+            
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        return resultado
+    
+    def bono_duracion_contrato(row):
+        red = row['RED']
+        duracion = row['DURACION CONTRATO']
+        valor =row['TOTAL MENSUALIDAD']
+        print(duracion, type(duracion), duracion==24)
+        if red == 'FO':
+            if duracion == 24:
+                print('aca 24')
+                comision_valor = comisiones_dic['servicios fo 24 meses']
+                print(comision_valor)
+            elif duracion == 36:
+                print('aca 36')
+                comision_valor = comisiones_dic['servicios fo 36 meses']
+            elif duracion >= 48:
+                print('aca 48')
+                comision_valor = comisiones_dic['servicios fo 48 meses']
+            else:
+                comision_valor = 0
+            
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_valor = 0
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        print(resultado, valor, comision_float, comision_valor)
+        return resultado
+    
+    def servicio_cloud_iaas(row):
+        red = row['RED']
+        duracion = row['DURACION CONTRATO']
+        valor =row['TOTAL MENSUALIDAD']
+
+        if red == 'FO':
+            if duracion == 24:
+                comision_valor = comisiones_dic['servicios fo 24 meses']
+            if duracion == 36:
+                comision_valor = comisiones_dic['servicios fo 36 meses']
+            if duracion >= 48:
+                comision_valor = comisiones_dic['servicios fo 48 meses']
+            else:
+                comision_valor = 0
+            
+            comision_float = float(str(comision_valor).replace('%','')) / 100
+        else:
+            comision_float = 0
+        resultado = float(valor) * comision_float
+        return resultado
+
+    
+    print('activado calcular comisiones')
+    items = request.data['data']
+    df = pd.DataFrame(items)
+    df['comision servicios hfc'] = df.apply(comision_servicios_hfc, axis=1)
+    df['guia_llave'] = df['LLAVE'].str[:17]
+    paquetes = df.copy()
+    paquetes['LLAVE2'] = paquetes['LLAVE'].str[:17]
+    paquetes['cantidad'] = paquetes['LLAVE2']
+    paquetes = paquetes[['LLAVE2', 'cantidad']].groupby(['LLAVE2']).count().reset_index()
+    df = pd.merge(df, paquetes, left_on='guia_llave', right_on='LLAVE2', how='left')
+    df['aceleradores hfc'] = df.apply(aceleradores_hfc, axis=1)
+    df['comision servicios fo'] = df.apply(comision_servicios_fo, axis=1)
+    df['bono velocidad internet'] = df.apply(bono_velocidad_internet, axis=1)
+    df['bono duracion contrato'] = df.apply(bono_duracion_contrato, axis=1)
+
+    print(paquetes)
+
+
+    # for valorT in items:
+    #     for clave in valorT:
+    #         valor = valorT[clave]   
+    #         if not isinstance(valor, float) or valor == float('inf') or valor == float('-inf') or valor != valor:
+    #             print('este es el valor', valor)
+
+    agregados =[
+        'comision servicios hfc',
+        'aceleradores hfc',
+        'comision servicios fo',
+        'bono velocidad internet',
+        'bono duracion contrato',
+    ]
+    df['Total'] = df[agregados].sum(axis=1)
+    df['TOTAL MENSUALIDAD'] = pd.to_numeric(df['TOTAL MENSUALIDAD'], errors='coerce')
+    df['Porcentaje total'] = df['Total'] / df['TOTAL MENSUALIDAD'] * 100
+    df['Porcentaje total'] = df['Porcentaje total'].astype(str) + '%'
+
+    agregados.append('Total')
+    agregados.append('Porcentaje total')
+
+    df = df.drop(['guia_llave','LLAVE2','cantidad'], axis=1)
+    df.fillna(0, inplace=True)
+    df = df.astype(str)
+    lista_df = df.to_dict(orient='records')
+
+    return Response({'data': lista_df, 'agregados': agregados})
+
+@api_view(['GET', 'POST'])
+def porcentajes_comisiones(request):
+    porcentajes = [
+        'hfc new cross selling no convergente',
+        'hfc new cross selling convergente',
+        'hfc up selling no convergente',
+        'hfc up selling convergente',
+        'hfc sencillo red dth no convergente',
+        'hfc sencillo red dth convergente',
+        'hfc doble hfc dth no convergente',
+        'hfc doble hfc dth convergente',
+        'hfc triple hfc dth no convergente',
+        'hfc triple hfc dth convergente',
+        'total fijo 100-104,99% 1',
+        'total fijo 105-109,99% 1',
+        'total fijo 110-124,99% 1',
+        'total fijo 125% 1',
+        'total fijo 100-104,99% 2',
+        'total fijo 105-109,99% 2',
+        'total fijo 110-124,99% 2',
+        'total fijo 125% 2',
+        'total movil 80-89,99% 1',
+        'total movil 90-109,99% 1',
+        'total movil 110-124,99% 1',
+        'total movil 125% 1',
+        'total movil 80-89,99% 2',
+        'total movil 90-109,99% 2',
+        'total movil 110-124,99% 2',
+        'total movil 125% 2',
+        'servicios fo no convergente',
+        'servicios fo convergente',
+        'servicios fo vel 2',
+        'servicios fo vel 3',
+        'servicios fo vel 4',
+        'servicios fo 24 meses',
+        'servicios fo 36 meses',
+        'servicios fo 48 meses',
+        'servicios fo 0-49,9%',
+        'servicios fo 50-79,9%',
+        'servicios fo 80-99,9%',
+        'servicios fo 100-104,9%',
+        'servicios fo 105-109,9%',
+        'servicios fo 110%',
+        'iaas no convergente mes 1',
+        'iaas convergente mes 1',
+        'iaas no convergente mes 2',
+        'iaas convergente mes 2',
+        'iaas no convergente mes 3',
+        'iaas convergente mes 3',
+        'iaas no convergente mes 4',
+        'iaas convergente mes 4',
+        'saas no convergente mes 1',
+        'saas convergente mes 1',
+        'saas no convergente mes 2',
+        'saas convergente mes 2',
+        'saas no convergente mes 3',
+        'saas convergente mes 3',
+        'saas no convergente mes 4',
+        'saas convergente mes 4',
+    ]
+    data_consulta = models.Porcentaje_comision.objects.all()
+    df = list(data_consulta.values())
+    diccionario = {i['nombre']:i['valor'] for i in df}
+    
+    if request.method == 'GET':
+        data =[diccionario[i] for i in porcentajes]
+        return Response({'comisiones':data})
+    
+    if request.method == 'POST':
+        data_request = request.data
+        save_data = [{'nombre':porcentajes[i], 'valor': data_request[i]} for i in range(len(porcentajes)) if data_request[i] != diccionario[porcentajes[i]]]
+        print(save_data)
+        for i in save_data:
+            porcentaje = models.Porcentaje_comision.objects.get(nombre=i['nombre'])
+            porcentaje.valor = i['valor']
+            porcentaje.save()
+        return Response({'respuesta':'data guardada'})
 
 @api_view(['POST'])
 def excel_precios(request):

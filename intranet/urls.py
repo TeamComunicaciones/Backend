@@ -34,4 +34,6 @@ urlpatterns = [
     path('guardar-precios', views.guardar_precios),
     path('excel-precios', views.excel_precios),
     path('cambio-clave', views.cambio_clave),
+    path('porcentajes-comisiones', views.porcentajes_comisiones),
+    path('calcular-comisiones', views.calcular_comisiones),
 ]
