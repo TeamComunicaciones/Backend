@@ -36,4 +36,12 @@ urlpatterns = [
     path('cambio-clave', views.cambio_clave),
     path('porcentajes-comisiones', views.porcentajes_comisiones),
     path('calcular-comisiones', views.calcular_comisiones),
+    path('guardar-datos-corresponsal', views.guardar_datos_corresponsal),
+    path('select-datos-corresponsal', views.select_datos_corresponsal),
+    path('select-datos-corresponsal-cajero', views.select_datos_corresponsal_cajero),
+    path('select-consignaciones-corresponsal-cajero', views.select_consignaciones_corresponsal_cajero),
+    path('resumen-corresponsal', views.resumen_corresponsal),
+    path('encargados-corresponsal', views.encargados_corresponsal),
+    path('lista-usuarios', views.lista_usuarios),
+    path('consignacion-corresponsal', views.consignacion_corresponsal),
 ]

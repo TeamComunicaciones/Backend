@@ -9,6 +9,8 @@ from rest_framework.response import Response
 from django.shortcuts import render, redirect
 from django.contrib.auth import login, authenticate
 from sqlControl.sqlControl import Sql_conexion
+from django.db import IntegrityError
+from django.utils import timezone
 from . import models
 import jwt, datetime
 import json
@@ -23,9 +25,357 @@ import uuid
 import ast
 from datetime import date
 # import locale
+import string
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def select_consignaciones_corresponsal_cajero(request):
+    fecha = request.data['fecha']
+    sucursal = request.data['sucursal']
+    tamaño_fecha = len(fecha)
+    if tamaño_fecha == 7:
+        año, mes = map(int, fecha.split('-'))
+        fecha_inicio = datetime.datetime(año, mes, 1)
+        if mes == 12:
+            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+        else:
+            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    else:
+        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+
+    transacciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal)
+    transacciones_data = []
+    total_datos = 0
+    for t in transacciones:
+            total_datos = total_datos + t.valor
+    return Response({'total': f"${total_datos:,.2f}" })
+
+@api_view(['POST'])
+def consignacion_corresponsal(request):
+    if request.method == 'POST':
+        data = request.data
+        token = request.data['jwt']
+        image = request.FILES['image']
+        consignacion_data = json.loads(request.POST.get('data'))
+        payload = jwt.decode(token, 'secret', algorithms='HS256')
+        usuario = User.objects.get(username=payload['id'])
+        print(usuario.id)
+        tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+        client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+        client_secret = 'w3V8Q~2H9W7urWqPPpRLywCU3c69WLSjHWDRhdhB'
+
+        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+
+        data2 = {
+            'grant_type': 'client_credentials',
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'scope': 'https://graph.microsoft.com/.default'
+        }
+
+        response = requests.post(url, headers=headers, data=data2)
+
+        if response.status_code == 200:
+            access_token = response.json().get('access_token')
+        else:
+            raise AuthenticationFailed(f"Error getting access token")
+        
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/octet-stream'
+        }
+        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'  # Reemplaza con tu site-id
+        file_name = generate_unique_filename(image.name)
+        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+        response = requests.put(upload_url, headers=headers, data=image.read())
+
+        models.Corresponsal_consignacion.objects.create(
+            valor = consignacion_data.get('valor'),
+            banco = consignacion_data.get('banco'),
+            fecha_consignacion = datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+            fecha = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date(),
+            responsable = usuario.id,
+            estado = 'pendiente',
+            detalle = consignacion_data.get('detalle'),
+            url = file_name,
+            codigo_incocredito = 'Alpujarra'
+        )
+        print(data['data'])
+        return Response([])
+
+@api_view(['GET', 'POST', 'PUT'])
+def lista_usuarios(request):
+    if request.method == 'GET':
+        users = User.objects.all()
+        users_list = [{'id': i.id, 'document': i.username, 'firstName': i.first_name, 'lastName': i.last_name, 'active': i.is_active } for i in users if i.username != 'sebasmoncada']
+        return Response(users_list)
+    if request.method == 'POST':
+        type_action = request.data['type']
+        data = request.data['user']
+        user = User.objects.get(username = data['document'])
+        if type_action == 'reset':
+            user.set_password('Cambiame123')
+            user.save()
+        elif type_action == 'activate':
+            user.is_active = not data['active']
+            user.save()
+        return Response([])
+    if request.method == 'PUT':
+        data = request.data
+        user = User.objects.create_user(
+            password = 'Cambiame123',
+            username = data['document'],
+            first_name = data['firstName'],
+            last_name = data['lastName'],
+            email = data['email'],
+        )
+        user.save()
+        return Response([])
+
+@api_view(['POST'])
+def encargados_corresponsal(request):
+    sucursales = models.Codigo_oficina.objects.all()
+    sucursales = [i.terminal for i in sucursales]
+    users = User.objects.all()
+    users_list = [f'{i.username}-{i.first_name}-{i.last_name}' for i in users]
+    users_options = [{'value':f'{i.username}-{i.first_name}-{i.last_name}', 'text':f'{i.username}-{i.first_name}-{i.last_name}'} for i in users]
+    data = {
+        'sucursales': sucursales,
+        'users': users_list,
+        'users_options': users_options,
+    }
+    return Response(data)
+
+@api_view(['POST'])
+def resumen_corresponsal(request):
+    fecha = request.data['fecha']
+    sucursal = request.data['sucursal']
+    tamaño_fecha = len(fecha)
+    if tamaño_fecha == 7:
+        año, mes = map(int, fecha.split('-'))
+        fecha_inicio = datetime.datetime(año, mes, 1)
+        if mes == 12:
+            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+        else:
+            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    else:
+        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal )
+    valor_total = 0
+    for i in transacciones:
+        valor_total = valor_total + i.valor
+    nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
+    transacciones2 = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=nombre_sucursal)
+    total_datos2 = 0
+    transacciones_data = []
+    for t in transacciones2:
+            transacciones_data.append({
+                'valor' : f"${t.valor:,.2f}",
+                'banco' : t.banco,
+                'fecha_consignacion' : t.fecha_consignacion,
+                'fecha' : t.fecha,
+                'responsable' : t.responsable,
+                'estado' : t.estado,
+                'detalle' : t.detalle,
+                'url': t.url
+            })
+            total_datos2 = total_datos2 + t.valor
+    sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first()
+    df_consolidado = pd.DataFrame(transacciones_data)
+    consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
+    data = {
+        'valor':f"${valor_total:,.2f}", 
+        'titulo':sucursal_codigo.terminal,
+        'consignacion': f"${total_datos2:,.2f}",
+        'restante':f"${valor_total - total_datos2:,.2f}",
+        'consignaciones': consolidado
+    }
+    return Response(data)
+
+@api_view(['POST'])
+def select_datos_corresponsal(request):
+    fecha = request.data['fecha']
+    tamaño_fecha = len(fecha)
+    if tamaño_fecha == 7:
+        año, mes = map(int, fecha.split('-'))
+        fecha_inicio = datetime.datetime(año, mes, 1)
+        if mes == 12:
+            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+        else:
+            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    else:
+        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
+    transacciones_data = []
+    for t in transacciones:
+            transacciones_data.append({
+                'establecimiento': t.establecimiento,
+                'codigo_aval': t.codigo_aval,
+                'codigo_incocredito': t.codigo_incocredito,
+                'terminal': t.terminal,
+                'fecha': t.fecha.strftime('%d/%m/%Y'),
+                'hora': t.hora,
+                'nombre_convenio': t.nombre_convenio,
+                'operacion': t.operacion,
+                'fact_cta': t.fact_cta,
+                'cod_aut': t.cod_aut,
+                'valor': t.valor,
+                'nura': t.nura,
+                'esquema': t.esquema,
+                'numero_tarjeta': t.numero_tarjeta,
+                'comision': t.comision,
+            })
+    sucursales = models.Codigo_oficina.objects.all()
+    cod_sucursales = {i.codigo: i.terminal for i in sucursales} 
+    sucursales_dict = [{'value':i.codigo,'text':i.terminal} for i in sucursales]
+    df_transacciones = pd.DataFrame(transacciones_data)
+    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
+    df_transacciones['cuenta'] = 1
+    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta':'sum', 'valor':'sum'}).reset_index()
+    df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
+    # df_consolidado['valor'] = df_transacciones['valor'].apply(int)
+    consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
+    data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
+    return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
+
+@api_view(['POST'])
+def select_datos_corresponsal_cajero(request):
+    fecha = request.data['fecha']
+    sucursal = request.data['sucursal']
+    tamaño_fecha = len(fecha)
+    if tamaño_fecha == 7:
+        año, mes = map(int, fecha.split('-'))
+        fecha_inicio = datetime.datetime(año, mes, 1)
+        if mes == 12:
+            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+        else:
+            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    else:
+        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+    sucursales = models.Codigo_oficina.objects.all()
+    cod_sucursales = {i.terminal: i.codigo for i in sucursales}
+    codigo_sucursal = cod_sucursales[sucursal] 
+    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=codigo_sucursal)
+    transacciones_data = []
+    total_datos = 0
+    for t in transacciones:
+            transacciones_data.append({
+                'establecimiento': t.establecimiento,
+                'codigo_aval': t.codigo_aval,
+                'codigo_incocredito': t.codigo_incocredito,
+                'terminal': t.terminal,
+                'fecha': t.fecha.strftime('%d/%m/%Y'),
+                'hora': t.hora,
+                'nombre_convenio': t.nombre_convenio,
+                'operacion': t.operacion,
+                'fact_cta': t.fact_cta,
+                'cod_aut': t.cod_aut,
+                'valor': t.valor,
+                'nura': t.nura,
+                'esquema': t.esquema,
+                'numero_tarjeta': t.numero_tarjeta,
+                'comision': t.comision,
+            })
+            total_datos = total_datos + t.valor
+    return Response({'total': f"${total_datos:,.2f}" })
+
+@api_view(['POST'])
+def guardar_datos_corresponsal(request):
+    cabecera = request.data['cabecera']
+    items = request.data['items']
+    df =pd.DataFrame(items, columns=cabecera)
+    df.fillna("", inplace=True)
+    df['valor'] = df['valor'].replace("", "0").astype(int)
+    df['nura'] = df['nura'].replace("", "0").astype(int)
+    df['comision'] = df['comision'].replace("", "0").astype(int)
+    # df['fecha'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
+    fecha_min = df['fecha'].min()
+    fecha_max = df['fecha'].max()
+    fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
+    fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
+    try:
+        transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
+        transacciones_data = []
+        for t in transacciones:
+            transacciones_data.append({
+                'establecimiento': t.establecimiento,
+                'codigo_aval': t.codigo_aval,
+                'codigo_incocredito': t.codigo_incocredito,
+                'terminal': t.terminal,
+                'fecha': t.fecha.strftime('%d/%m/%Y'),
+                'hora': t.hora,
+                'nombre_convenio': t.nombre_convenio,
+                'operacion': t.operacion,
+                'fact_cta': t.fact_cta,
+                'cod_aut': t.cod_aut,
+                'valor': t.valor,
+                'nura': t.nura,
+                'esquema': t.esquema,
+                'numero_tarjeta': t.numero_tarjeta,
+                'comision': t.comision,
+            })
+
+        rows_to_drop = []
+        for index, row in df.iterrows():
+            row_dict = row.to_dict()
+            if row_dict in transacciones_data:
+                print('esta es igual ')
+                rows_to_drop.append(index)
+        df.drop(rows_to_drop, inplace=True)
+    except:
+        pass
+    transacciones = []
+    for index, row in df.iterrows():
+        try:
+            establecimiento = row.establecimiento
+            codigo_aval = row.codigo_aval
+            codigo_incocredito = row.codigo_incocredito
+            terminal = row.terminal
+            fecha = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
+            hora = row.hora
+            nombre_convenio = row.nombre_convenio
+            operacion = row.operacion
+            fact_cta = row.fact_cta
+            cod_aut = row.cod_aut
+            valor = row.valor if operacion != 'Retiro' else -row.valor
+            nura = row.nura
+            esquema = row.esquema
+            numero_tarjeta = row.numero_tarjeta
+            comision = row.comision
+            transacciones.append(models.Transacciones_sucursal(
+                establecimiento=establecimiento,
+                codigo_aval=codigo_aval,
+                codigo_incocredito=codigo_incocredito,
+                terminal=terminal,
+                fecha=fecha,
+                hora=hora,
+                nombre_convenio=nombre_convenio,
+                operacion=operacion,
+                fact_cta=fact_cta,
+                cod_aut=cod_aut,
+                valor=valor,
+                nura=nura,
+                esquema=esquema,
+                numero_tarjeta=numero_tarjeta,
+                comision=comision,
+            ))
+        except Exception as e:
+            texto = str(e).replace("'Series' object has no attribute ","Datos no tienen columna ")
+            raise AuthenticationFailed(texto)
+        
+    models.Transacciones_sucursal.objects.bulk_create(transacciones)
+   
+    return Response({'mensaje':'Guardado con exito'})
 
 @api_view(['POST'])
 def calcular_comisiones(request):
@@ -349,6 +699,9 @@ def excel_precios(request):
         for i in cabecera:
             if value == i['text']:
                 titulos_diccionario[key] = i['value']
+                print('....................................1')
+                print(value, key, i['value'])
+                print('....................................1')
 
     data = [titulos]
 
@@ -359,6 +712,11 @@ def excel_precios(request):
             if titulos_diccionario[titulo] is None:
                 temp_fila.append(sin_data)
             else:
+                print('---------------------------------------------------------')
+                print(titulos_diccionario)
+                print(titulo)
+                print(precio)
+                print('--------------------------------')
                 temp_fila.append(precio[int(titulos_diccionario[titulo])])
         data.append(temp_fila)
     
@@ -374,6 +732,7 @@ def guardar_precios(request):
             producto = precio[0]
             nombre = cabecera[i]['text']
             valor = precio[i]
+            print(producto, nombre, valor)
             models.Lista_precio.objects.create(
                 producto= producto,
                 nombre = nombre,
@@ -756,6 +1115,12 @@ def user_permissions(request):
                 'comercial' : {
                     'main': False,
                 },
+                'corresponsal' : {
+                    'main': False,
+                },
+                'caja' : {
+                    'main': False,
+                },
             }
             for i in permisos_ind:
                 permisos[i.permiso.permiso]['main'] = i.tiene_permiso
@@ -818,6 +1183,7 @@ def permissions(request):
                 auditoria = models.Permisos_usuarios.objects.filter(user=i.id, permiso=7)
                 comercial = models.Permisos_usuarios.objects.filter(user=i.id, permiso=8)
                 informes= models.Permisos_usuarios.objects.filter(user=i.id, permiso=9)
+                corresponsal= models.Permisos_usuarios.objects.filter(user=i.id, permiso=10)
                 data.append({
                     'usuario': i.username,
                     'administrador': administrador[0].tiene_permiso if len(administrador)>0 else False,
@@ -829,6 +1195,7 @@ def permissions(request):
                     'soporte': soporte[0].tiene_permiso if len(soporte)>0 else False,
                     'auditoria': auditoria[0].tiene_permiso if len(auditoria)>0 else False,
                     'comercial': comercial[0].tiene_permiso if len(comercial)>0 else False,
+                    'corresponsal': comercial[0].tiene_permiso if len(corresponsal)>0 else False,
                     })
         except jwt.ExpiredSignatureError:
             raise AuthenticationFailed('Debes estar logueado')
@@ -1098,7 +1465,6 @@ def lista_productos_prepago(requests):
         df = pd.DataFrame(list(data.values()))
         df['dia'] = pd.to_datetime(df['dia'])
         df['valor'] = df['valor'].astype(float)
-        
 
         df_descuentos = df[df['nombre'] == 'descuento']
         df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
@@ -1108,7 +1474,6 @@ def lista_productos_prepago(requests):
         
         df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         
-
         df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
 
         df_kit_addi = df[df['nombre'] == 'Kit Addi']
@@ -1529,3 +1894,15 @@ def formating_numbers(number, type_value=''):
 #     usuario = User.objects.get(username=id)
 #     usuario.set_password('Cambiame123')
 #     usuario.save()
+
+
+def generate_unique_filename(filename):
+            # Obtener la extensión del archivo
+            file_extension = filename.split('.')[-1]
+            # Obtener la fecha y hora actual
+            current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            # Generar una cadena aleatoria de 6 caracteres
+            random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+            # Combinar para crear un nombre único
+            unique_filename = f"{current_time}_{random_string}.{file_extension}"
+            return unique_filename

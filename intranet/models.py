@@ -71,3 +71,42 @@ class Porcentaje_comision(models.Model):
     valor = models.CharField(max_length=255)
     def __str__(self):
         return self.nombre
+
+class Transacciones_sucursal(models.Model):
+    establecimiento = models.CharField(max_length=100)
+    codigo_aval = models.CharField(max_length=100)
+    codigo_incocredito = models.CharField(max_length=100)
+    terminal = models.CharField(max_length=100)
+    fecha = models.DateTimeField()
+    hora = models.CharField(max_length=100)
+    nombre_convenio = models.CharField(max_length=100)
+    operacion = models.CharField(max_length=100)
+    fact_cta = models.CharField(max_length=100)
+    cod_aut = models.CharField(max_length=100)
+    valor = models.DecimalField(max_digits=10, decimal_places=2)
+    nura = models.DecimalField(max_digits=10, decimal_places=2)
+    esquema = models.CharField(max_length=100)
+    numero_tarjeta = models.CharField(max_length=100)
+    comision = models.DecimalField(max_digits=10, decimal_places=2)
+
+class Codigo_oficina(models.Model):
+    codigo = models.CharField(max_length=100, unique=True)
+    terminal = models.CharField(max_length=100)
+    def __str__(self):
+        return f'{self.codigo}-{self.terminal}'
+
+class Responsable_corresponsal(models.Model):
+    sucursal = models.ForeignKey(Codigo_oficina, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+
+class Corresponsal_consignacion(models.Model):
+    valor = models.DecimalField(max_digits=10, decimal_places=2)
+    banco = models.CharField(max_length=100)
+    fecha_consignacion = models.DateField()
+    fecha = models.DateTimeField()
+    responsable = models.CharField(max_length=100)
+    estado = models.CharField(max_length=20)
+    detalle = models.TextField()
+    url = models.URLField(blank=True, null=True)
+    codigo_incocredito = models.CharField(max_length=100, null=True)
+
