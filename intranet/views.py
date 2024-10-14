@@ -1,6 +1,7 @@
 from rest_framework.exceptions import AuthenticationFailed
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.http import JsonResponse, HttpResponse
 from django.contrib.auth.models import User
 from rest_framework.decorators import api_view
 from django.db.models.signals import pre_save
@@ -26,9 +27,58 @@ import ast
 from datetime import date
 # import locale
 import string
+import base64
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def get_image_corresponsal(request):
+    tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+    client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+    client_secret = 'w3V8Q~2H9W7urWqPPpRLywCU3c69WLSjHWDRhdhB'
+
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+
+    data2 = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'scope': 'https://graph.microsoft.com/.default'
+    }
+
+    response = requests.post(url, headers=headers, data=data2)
+
+    if response.status_code == 200:
+        access_token = response.json().get('access_token')
+    else:
+        raise AuthenticationFailed(f"Error getting access token")
+    
+    file_name = request.data['url']
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': 'application/json'
+    }
+    site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+    download_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+
+    # Descargar la imagen desde SharePoint
+    response = requests.get(download_url, headers=headers)
+
+    if response.status_code == 200:
+        # Devolver la imagen al frontend
+        encoded_image = base64.b64encode(response.content).decode('utf-8')
+        return JsonResponse({'image': encoded_image, 'content_type': response.headers['Content-Type']})
+    else:
+        return JsonResponse({'error': response.json()}, status=400)
+
+
+    pass
 
 @api_view(['POST'])
 def select_consignaciones_corresponsal_cajero(request):
@@ -49,9 +99,15 @@ def select_consignaciones_corresponsal_cajero(request):
     transacciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal)
     transacciones_data = []
     total_datos = 0
+    data_transacciones = []
     for t in transacciones:
             total_datos = total_datos + t.valor
-    return Response({'total': f"${total_datos:,.2f}" })
+            data_transacciones.append({
+                'banco': t.banco,
+                'url': t.url,
+                'valor': f"${t.valor:,.2f}",
+            })
+    return Response({'total': f"${total_datos:,.2f}", 'detalles': data_transacciones})
 
 @api_view(['POST'])
 def consignacion_corresponsal(request):
@@ -95,17 +151,18 @@ def consignacion_corresponsal(request):
         file_name = generate_unique_filename(image.name)
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
         response = requests.put(upload_url, headers=headers, data=image.read())
-
+        estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
         models.Corresponsal_consignacion.objects.create(
             valor = consignacion_data.get('valor'),
             banco = consignacion_data.get('banco'),
             fecha_consignacion = datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             fecha = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date(),
             responsable = usuario.id,
-            estado = 'pendiente',
+            estado = estado,
             detalle = consignacion_data.get('detalle'),
             url = file_name,
-            codigo_incocredito = 'Alpujarra'
+            codigo_incocredito = 'Alpujarra',
+            detalle_banco = consignacion_data.get('proveedor'),
         )
         print(data['data'])
         return Response([])
@@ -175,19 +232,25 @@ def resumen_corresponsal(request):
     nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
     transacciones2 = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=nombre_sucursal)
     total_datos2 = 0
+    pendientes = 0
     transacciones_data = []
+    usuarios = User.objects.all()
+    dic_usuarios = { i.id: i.username for i in usuarios}
     for t in transacciones2:
             transacciones_data.append({
                 'valor' : f"${t.valor:,.2f}",
                 'banco' : t.banco,
                 'fecha_consignacion' : t.fecha_consignacion,
                 'fecha' : t.fecha,
-                'responsable' : t.responsable,
+                'responsable' : dic_usuarios[int(t.responsable)],
                 'estado' : t.estado,
                 'detalle' : t.detalle,
                 'url': t.url
             })
-            total_datos2 = total_datos2 + t.valor
+            if t.estado == 'pendiente':
+                pendientes = pendientes + t.valor
+            else:
+                total_datos2 = total_datos2 + t.valor
     sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first()
     df_consolidado = pd.DataFrame(transacciones_data)
     consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
@@ -195,8 +258,9 @@ def resumen_corresponsal(request):
         'valor':f"${valor_total:,.2f}", 
         'titulo':sucursal_codigo.terminal,
         'consignacion': f"${total_datos2:,.2f}",
-        'restante':f"${valor_total - total_datos2:,.2f}",
-        'consignaciones': consolidado
+        'pendiente': f"${pendientes:,.2f}",
+        'restante':f"${valor_total - total_datos2 - pendientes:,.2f}",
+        'consignaciones': transacciones_data
     }
     return Response(data)
 

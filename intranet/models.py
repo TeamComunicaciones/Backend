@@ -109,4 +109,5 @@ class Corresponsal_consignacion(models.Model):
     detalle = models.TextField()
     url = models.URLField(blank=True, null=True)
     codigo_incocredito = models.CharField(max_length=100, null=True)
+    detalle_banco = models.CharField(max_length=100, null=True)
 
