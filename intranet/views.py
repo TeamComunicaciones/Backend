@@ -9,6 +9,8 @@ from django.dispatch import receiver
 from rest_framework.response import Response
 from django.shortcuts import render, redirect
 from django.contrib.auth import login, authenticate
+from django.shortcuts import get_object_or_404
+from django.core.exceptions import ObjectDoesNotExist
 from sqlControl.sqlControl import Sql_conexion
 from django.db import IntegrityError
 from django.utils import timezone
@@ -31,6 +33,21 @@ import base64
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['POST'])
+def assign_responsible(request):
+    responsable = request.data['encargado']
+    sucursal = request.data['sucursal']
+    responsable_id = models.User.objects.get(username=responsable.split('-')[0])
+    sucursal_id = models.Codigo_oficina.objects.get(terminal=sucursal)
+    try:
+        responsable_corresponsal = models.Responsable_corresponsal.objects.get(sucursal=sucursal_id)
+        responsable_corresponsal.user = responsable_id
+        responsable_corresponsal.save()
+    except ObjectDoesNotExist:
+        models.Responsable_corresponsal.objects.create(sucursal=sucursal_id, user=responsable_id)
+    return Response([])
+
 
 @api_view(['POST'])
 def get_image_corresponsal(request):
@@ -200,13 +217,16 @@ def lista_usuarios(request):
 def encargados_corresponsal(request):
     sucursales = models.Codigo_oficina.objects.all()
     sucursales = [i.terminal for i in sucursales]
+    responsables = models.Responsable_corresponsal.objects.all()
+    responsables = {i.sucursal.terminal: f'{i.user.username}-{i.user.first_name}-{i.user.last_name}' for i in responsables}
     users = User.objects.all()
     users_list = [f'{i.username}-{i.first_name}-{i.last_name}' for i in users]
-    users_options = [{'value':f'{i.username}-{i.first_name}-{i.last_name}', 'text':f'{i.username}-{i.first_name}-{i.last_name}'} for i in users]
+    users_options = [{'value':f'{i.username}-{i.first_name}-{i.last_name}', 'text':f'{i.username}-{i.first_name}-{i.last_name}'} for i in users if i.username != 'sebasmoncada']
     data = {
         'sucursales': sucursales,
         'users': users_list,
         'users_options': users_options,
+        'responsables': responsables,
     }
     return Response(data)
 
@@ -305,16 +325,47 @@ def select_datos_corresponsal(request):
     df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
     df_transacciones['cuenta'] = 1
     df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta':'sum', 'valor':'sum'}).reset_index()
+    if tamaño_fecha == 7:
+        fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
+        fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
+    consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
+    consignaciones_data = []
+    for i in consignaciones:
+            consignaciones_data.append({
+                'codigo_incocredito': i.codigo_incocredito,
+                'estado': i.estado,
+                'valor': i.valor,
+            })
+    df_consignaciones = pd.DataFrame(consignaciones_data)
+    df_consignaciones = df_consignaciones.pivot_table(
+        index='codigo_incocredito', 
+        columns='estado', 
+        values='valor', 
+        aggfunc='sum'
+    ).reset_index()
+    df_consignaciones = df_consignaciones.fillna(0)
+    df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
+    df_consolidado = df_consolidado.fillna(0)
     df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
-    # df_consolidado['valor'] = df_transacciones['valor'].apply(int)
-    consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
+    df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
+    df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
+    consolidado = df_consolidado.to_dict(orient='records')
     data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
     return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
 
 @api_view(['POST'])
 def select_datos_corresponsal_cajero(request):
     fecha = request.data['fecha']
-    sucursal = request.data['sucursal']
+    token = request.data['jwt']
+    payload = jwt.decode(token, 'secret', algorithms='HS256')
+    user = User.objects.get(username = payload['id'])
+    sucursales = models.Responsable_corresponsal.objects.all()
+    sucursal = ''
+    for i in sucursales:
+        if i.user.username == user.username:
+            sucursal = i.sucursal.terminal
+            break
+    # sucursal = request.data['sucursal']
     tamaño_fecha = len(fecha)
     if tamaño_fecha == 7:
         año, mes = map(int, fecha.split('-'))
@@ -351,7 +402,7 @@ def select_datos_corresponsal_cajero(request):
                 'comision': t.comision,
             })
             total_datos = total_datos + t.valor
-    return Response({'total': f"${total_datos:,.2f}" })
+    return Response({'total': f"${total_datos:,.2f}", 'sucursal': sucursal})
 
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
