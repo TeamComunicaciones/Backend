@@ -45,4 +45,5 @@ urlpatterns = [
     path('lista-usuarios', views.lista_usuarios),
     path('consignacion-corresponsal', views.consignacion_corresponsal),
     path('get-imagen-corresponsal', views.get_image_corresponsal),
+    path('assign-responsible', views.assign_responsible),
 ]
