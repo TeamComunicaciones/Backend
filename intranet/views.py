@@ -35,6 +35,41 @@ import base64
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
 @api_view(['POST'])
+def settle_invoice(request):
+    total = request.data['total']
+    saldar = request.data['saldar']
+    seleccionados = request.data['seleccionados']
+    fecha = request.data['fecha']
+    tamaño_fecha = len(fecha)
+    if tamaño_fecha == 7:
+        fecha = fecha + "-01"
+    token = request.data['jwt']
+    sucursal = request.data['sucursal']
+    sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
+    payload = jwt.decode(token, 'secret', algorithms='HS256')
+    usuario = User.objects.get(username=payload['id'])
+    referencias = []
+    for select in seleccionados:
+        referencias.append(f"{select['id']}")
+        consignacion = models.Corresponsal_consignacion.objects.get(id=select['id'])
+        consignacion.estado = 'saldado'
+        consignacion.save()
+    referencias_text = '-'.join(referencias) if len(referencias) > 1 else f"{referencias[0]}"
+    models.Corresponsal_consignacion.objects.create(
+            valor = total,
+            banco = 'Corresponsal Banco de Bogota',
+            fecha_consignacion = datetime.datetime.strptime(saldar['fechaConsignacion'], '%Y-%m-%d').date(),
+            fecha = datetime.datetime.strptime(fecha, '%Y-%m-%d').date(),
+            responsable = usuario.id,
+            estado = 'Conciliado',
+            detalle = saldar['detalle'],
+            url = '',
+            codigo_incocredito = sucursal_id.terminal,
+            detalle_banco = referencias_text,
+        )
+    return Response([])
+
+@api_view(['POST'])
 def assign_responsible(request):
     responsable = request.data['encargado']
     sucursal = request.data['sucursal']
@@ -132,6 +167,8 @@ def consignacion_corresponsal(request):
         data = request.data
         token = request.data['jwt']
         image = request.FILES['image']
+        sucursal = request.data['sucursal']
+        # sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
         consignacion_data = json.loads(request.POST.get('data'))
         payload = jwt.decode(token, 'secret', algorithms='HS256')
         usuario = User.objects.get(username=payload['id'])
@@ -178,7 +215,7 @@ def consignacion_corresponsal(request):
             estado = estado,
             detalle = consignacion_data.get('detalle'),
             url = file_name,
-            codigo_incocredito = 'Alpujarra',
+            codigo_incocredito = sucursal,
             detalle_banco = consignacion_data.get('proveedor'),
         )
         print(data['data'])
@@ -258,6 +295,7 @@ def resumen_corresponsal(request):
     dic_usuarios = { i.id: i.username for i in usuarios}
     for t in transacciones2:
             transacciones_data.append({
+                'id': t.id,
                 'valor' : f"${t.valor:,.2f}",
                 'banco' : t.banco,
                 'fecha_consignacion' : t.fecha_consignacion,
@@ -269,8 +307,10 @@ def resumen_corresponsal(request):
             })
             if t.estado == 'pendiente':
                 pendientes = pendientes + t.valor
-            else:
+            elif t.estado == 'saldado':
                 total_datos2 = total_datos2 + t.valor
+            else:
+                pass
     sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first()
     df_consolidado = pd.DataFrame(transacciones_data)
     consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
@@ -336,19 +376,23 @@ def select_datos_corresponsal(request):
                 'estado': i.estado,
                 'valor': i.valor,
             })
-    df_consignaciones = pd.DataFrame(consignaciones_data)
-    df_consignaciones = df_consignaciones.pivot_table(
-        index='codigo_incocredito', 
-        columns='estado', 
-        values='valor', 
-        aggfunc='sum'
-    ).reset_index()
-    df_consignaciones = df_consignaciones.fillna(0)
-    df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
+    if len(consignaciones_data) > 0:
+        df_consignaciones = pd.DataFrame(consignaciones_data)
+        df_consignaciones = df_consignaciones.pivot_table(
+            index='codigo_incocredito', 
+            columns='estado', 
+            values='valor', 
+            aggfunc='sum'
+        ).reset_index()
+        df_consignaciones = df_consignaciones.fillna(0)
+        df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
+    
     df_consolidado = df_consolidado.fillna(0)
     df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
-    df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
-    df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
+    if 'pendiente' in df_consolidado.columns:
+        df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
+    if 'saldado' in df_consolidado.columns:
+        df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
     consolidado = df_consolidado.to_dict(orient='records')
     data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
     return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
@@ -416,8 +460,12 @@ def guardar_datos_corresponsal(request):
     # df['fecha'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
     fecha_min = df['fecha'].min()
     fecha_max = df['fecha'].max()
-    fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
-    fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
+    try:
+        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
+        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
+    except:
+        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
+        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
     try:
         transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
         transacciones_data = []
@@ -452,11 +500,15 @@ def guardar_datos_corresponsal(request):
     transacciones = []
     for index, row in df.iterrows():
         try:
+            try:
+                time_date = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
+            except:
+                time_date = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
             establecimiento = row.establecimiento
             codigo_aval = row.codigo_aval
             codigo_incocredito = row.codigo_incocredito
             terminal = row.terminal
-            fecha = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
+            fecha = time_date
             hora = row.hora
             nombre_convenio = row.nombre_convenio
             operacion = row.operacion
