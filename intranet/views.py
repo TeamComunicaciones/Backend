@@ -34,6 +34,27 @@ import base64
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
+@api_view(['GET', 'POST'])
+def black_list(request):
+    if request.method == 'GET':
+        data = models.Lista_negra.objects.all()
+        data_list = [{'id': i.id, 'product': i.equipo} for i in data]
+        return Response({"data":data_list})
+    if request.method == 'POST':
+        token = request.data['jwt']
+        if not token:
+            raise AuthenticationFailed('Debes estar logueado')
+        else:
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+                usuario = User.objects.get(username=payload['id'])
+            except jwt.ExpiredSignatureError:
+                raise AuthenticationFailed('Debes estar logueado')
+        product = request.data['product']
+        models.Lista_negra.objects.create(equipo= product)
+        return Response({"data":"successful creation"})
+
+
 @api_view(['POST'])
 def settle_invoice(request):
     total = request.data['total']

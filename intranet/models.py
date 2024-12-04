@@ -111,3 +111,8 @@ class Corresponsal_consignacion(models.Model):
     codigo_incocredito = models.CharField(max_length=100, null=True)
     detalle_banco = models.CharField(max_length=100, null=True)
 
+class Lista_negra(models.Model):
+    equipo = models.CharField(max_length=255, unique=True)
+    def __str__(self) -> str:
+        return self.equipo
+
