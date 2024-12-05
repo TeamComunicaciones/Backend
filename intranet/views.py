@@ -227,6 +227,7 @@ def consignacion_corresponsal(request):
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
         response = requests.put(upload_url, headers=headers, data=image.read())
         estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
+        detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
         models.Corresponsal_consignacion.objects.create(
             valor = consignacion_data.get('valor'),
             banco = consignacion_data.get('banco'),
@@ -234,7 +235,7 @@ def consignacion_corresponsal(request):
             fecha = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date(),
             responsable = usuario.id,
             estado = estado,
-            detalle = consignacion_data.get('detalle'),
+            detalle = detalle,
             url = file_name,
             codigo_incocredito = sucursal,
             detalle_banco = consignacion_data.get('proveedor'),
@@ -275,6 +276,7 @@ def lista_usuarios(request):
 def encargados_corresponsal(request):
     sucursales = models.Codigo_oficina.objects.all()
     sucursales = [i.terminal for i in sucursales]
+    sucursales.sort()
     responsables = models.Responsable_corresponsal.objects.all()
     responsables = {i.sucursal.terminal: f'{i.user.username}-{i.user.first_name}-{i.user.last_name}' for i in responsables}
     users = User.objects.all()
