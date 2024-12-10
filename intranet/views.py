@@ -34,7 +34,7 @@ import base64
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
-@api_view(['GET', 'POST'])
+@api_view(['GET', 'POST', 'DELETE'])
 def black_list(request):
     if request.method == 'GET':
         data = models.Lista_negra.objects.all()
@@ -53,6 +53,28 @@ def black_list(request):
         product = request.data['product']
         models.Lista_negra.objects.create(equipo= product)
         return Response({"data":"successful creation"})
+    if request.method == 'DELETE':
+        token = request.data.get('jwt')
+        if not token:
+            raise AuthenticationFailed('Debes estar logueado')
+        try:
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            usuario = User.objects.get(username=payload['id'])
+        except jwt.ExpiredSignatureError:
+            raise AuthenticationFailed('Debes estar logueado')
+
+        item_id = request.data.get('id')
+        if not item_id:
+            return Response({"error": "El campo 'id' es obligatorio"}, status=400)
+
+        try:
+            item = models.Lista_negra.objects.get(id=item_id)
+            item.delete()
+            return Response({"data": f"El producto con ID {item_id} fue eliminado exitosamente"})
+        except models.Lista_negra.DoesNotExist:
+            return Response({"error": "El producto no existe"}, status=404)
+        except Exception as e:
+            return Response({"error": f"No se pudo eliminar el producto: {str(e)}"}, status=400)
 
 
 @api_view(['POST'])
