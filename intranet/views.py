@@ -515,6 +515,7 @@ def guardar_datos_corresponsal(request):
         transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
         transacciones_data = []
         for t in transacciones:
+            valor = t.valor if t.operacion != 'Retiro' else - t.valor
             transacciones_data.append({
                 'establecimiento': t.establecimiento,
                 'codigo_aval': t.codigo_aval,
@@ -526,7 +527,7 @@ def guardar_datos_corresponsal(request):
                 'operacion': t.operacion,
                 'fact_cta': t.fact_cta,
                 'cod_aut': t.cod_aut,
-                'valor': t.valor,
+                'valor': valor,
                 'nura': t.nura,
                 'esquema': t.esquema,
                 'numero_tarjeta': t.numero_tarjeta,
@@ -537,7 +538,7 @@ def guardar_datos_corresponsal(request):
         for index, row in df.iterrows():
             row_dict = row.to_dict()
             if row_dict in transacciones_data:
-                print('esta es igual ')
+                # print('esta es igual ')
                 rows_to_drop.append(index)
         df.drop(rows_to_drop, inplace=True)
     except:
@@ -559,7 +560,7 @@ def guardar_datos_corresponsal(request):
             operacion = row.operacion
             fact_cta = row.fact_cta
             cod_aut = row.cod_aut
-            valor = row.valor if operacion != 'Retiro' else -row.valor
+            # valor = row.valor if operacion != 'Retiro' else -row.valor
             nura = row.nura
             esquema = row.esquema
             numero_tarjeta = row.numero_tarjeta
