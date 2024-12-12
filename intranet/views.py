@@ -516,6 +516,8 @@ def guardar_datos_corresponsal(request):
         transacciones_data = []
         for t in transacciones:
             valor = t.valor if t.operacion != 'Retiro' else - t.valor
+            if t.operacion == 'Retiro':
+                pass
             transacciones_data.append({
                 'establecimiento': t.establecimiento,
                 'codigo_aval': t.codigo_aval,
@@ -560,7 +562,7 @@ def guardar_datos_corresponsal(request):
             operacion = row.operacion
             fact_cta = row.fact_cta
             cod_aut = row.cod_aut
-            valor = row.valor
+            valor = row.valor if row.operacion != 'Retiro' else - row.valor
             nura = row.nura
             esquema = row.esquema
             numero_tarjeta = row.numero_tarjeta
