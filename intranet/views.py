@@ -1536,6 +1536,9 @@ def translate_prepago(requests):
         } for item in translates]
         df_translates = pd.DataFrame(translates)
         df_equipos = pd.DataFrame(data)
+        black_list = models.Lista_negra.objects.all()
+        black_list = [item.equipo for item in black_list]
+        df_equipos = df_equipos[~df_equipos[0].isin(black_list)]
         df_equipos.columns = [
             'equipo',
             'valor', 
