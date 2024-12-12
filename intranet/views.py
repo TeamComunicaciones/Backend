@@ -560,7 +560,7 @@ def guardar_datos_corresponsal(request):
             operacion = row.operacion
             fact_cta = row.fact_cta
             cod_aut = row.cod_aut
-            # valor = row.valor if operacion != 'Retiro' else -row.valor
+            valor = row.valor
             nura = row.nura
             esquema = row.esquema
             numero_tarjeta = row.numero_tarjeta
