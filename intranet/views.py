@@ -39,6 +39,7 @@ def black_list(request, id=None):
     if request.method == 'GET':
         data = models.Lista_negra.objects.all()
         data_list = [{'id': i.id, 'product': i.equipo} for i in data]
+        data_list = sorted(data_list, key=lambda x: x['product'].lower())
         return Response({"data":data_list})
     if request.method == 'POST':
         token = request.data['jwt']
@@ -1461,6 +1462,7 @@ def translate_products_prepago(request):
                 'active': i.active,
             }
             data.append(subdata)
+        data = sorted(data, key=lambda x: x['producto'].lower())    
         return Response(data)
     if request.method == 'POST':
         data = request.body
