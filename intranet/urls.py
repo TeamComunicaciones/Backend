@@ -48,5 +48,7 @@ urlpatterns = [
     path('assign-responsible', views.assign_responsible),
     path('settle-invoice', views.settle_invoice),
     path('black-list', views.black_list),
-     path('black-list/<int:id>/', views.black_list),
+    path('black-list/<int:id>/', views.black_list),
+    path('prices', views.prices),
+    path('prices/<int:id>/', views.prices),
 ]

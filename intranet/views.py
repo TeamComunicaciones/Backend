@@ -34,6 +34,67 @@ import base64
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
+@api_view(['GET', 'POST', 'PUT' ,'DELETE'])
+def prices(request, id=None):
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        token = auth_header.split(' ')[1]
+        if not token:
+            raise AuthenticationFailed('You must be logged in.')
+        else:
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+            except jwt.ExpiredSignatureError:
+                raise AuthenticationFailed('You must be logged in.')
+    else:
+        raise AuthenticationFailed('Authentication token not found.')
+    
+    if request.method == 'GET':
+        if id is not None:
+            try:
+                data = models.Permisos_precio.objects.get(id=id)
+            except:
+                raise AuthenticationFailed('You must be logged in.')
+            return Response({'data': {'id': data.id, 'name': data.permiso, 'state': data.active}})
+        else:
+            data = models.Permisos_precio.objects.all()
+            data_list = [{'id': i.id, 'name': i.permiso, 'state': i.active} for i in data]
+            data_list = sorted(data_list, key=lambda x: x['name'].lower())
+            return Response({'data':data_list})
+    elif request.method == 'POST':
+        name = request.data['name']
+        state = request.data['state']
+        models.Permisos_precio.objects.create(permiso=name, active=state)
+        return Response({'data':'successful creation'})
+    elif request.method == 'PUT':
+        if id is not None:
+            name = request.data['name']
+            state = request.data['state']
+            if state == 'True' or state == 'true':
+                state = True
+            elif state == 'False' or state == 'false':
+                state = False
+            data = models.Permisos_precio.objects.get(id=id)
+            data.permiso = name
+            data.active = state
+            data.save()
+            return Response({'data':'successful edit'})
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+    elif request.method == 'DELETE':
+        if id is not None:
+            try:
+                data = models.Permisos_precio.objects.get(id=id)
+                data.delete()
+                return Response({'data': f'The price with ID {id} was successfully removed'})
+            except models.Lista_negra.DoesNotExist:
+                return Response({'error': 'The price does not exist'}, status=404)
+            except Exception as e:
+                return Response({'error': f'Could not delete product: {str(e)}'}, status=400)
+
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+
 @api_view(['GET', 'POST', 'DELETE'])
 def black_list(request, id=None):
     if request.method == 'GET':
