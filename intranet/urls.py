@@ -51,4 +51,6 @@ urlpatterns = [
     path('black-list/<int:id>/', views.black_list),
     path('prices', views.prices),
     path('prices/<int:id>/', views.prices),
+    path('variables', views.variables_prices),
+    path('variables/<int:id>/', views.variables_prices),
 ]

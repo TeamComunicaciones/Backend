@@ -34,6 +34,87 @@ import base64
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
+@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+def variables_prices(request, id=None):
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        token = auth_header.split(' ')[1]
+        if not token:
+            raise AuthenticationFailed('You must be logged in.')
+        else:
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+            except jwt.ExpiredSignatureError:
+                raise AuthenticationFailed('You must be logged in.')
+    else:
+        raise AuthenticationFailed('Authentication token not found.')
+    
+    if request.method == 'GET':
+        if id is not None:
+            try:
+                data = models.Variables_prices.objects.get(id=id)
+            except:
+                raise AuthenticationFailed('You must be logged in.')
+            return Response({
+                'data': {
+                    'id': data.id, 
+                    'name': data.name, 
+                    'price': data.price.permiso,
+                    'formula': data.formula
+                    }
+                })
+        else:
+            data = models.Variables_prices.objects.all()
+            data_list = [{
+                            'id': i.id, 
+                            'name': i.name, 
+                            'price': i.price.permiso,
+                            'formula': i.formula
+                        } for i in data]
+            data_list = sorted(data_list, key=lambda x: x['name'].lower())
+            return Response({'data':data_list})
+    elif request.method == 'POST':
+        name = request.data['name']
+        price = request.data['price']
+        formula = request.data['formula']
+        try:
+            price = models.Permisos_precio.objects.get(id=price)
+        except: 
+            pass
+        models.Variables_prices.objects.create(name=name, price=price, formula=formula)
+        return Response({'data':'successful creation'})
+    elif request.method == 'PUT':
+        if id is not None:
+            name = request.data['name']
+            price = request.data['price']
+            formula = request.data['formula']
+            data = models.Variables_prices.objects.get(id=id)
+            data.name = name
+            try:
+                price = models.Permisos_precio.objects.get(id=price)
+            except: 
+                pass
+            data.price = price
+            data.formula = formula
+            data.save()
+            return Response({'data':'successful edit'})
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+    elif request.method == 'DELETE':
+        if id is not None:
+            try:
+                data = models.Variables_prices.objects.get(id=id)
+                data.delete()
+                return Response({'data': f'The variable with ID {id} was successfully removed'})
+            except models.Variables_prices.DoesNotExist:
+                return Response({'error': 'The variable does not exist'}, status=404)
+            except Exception as e:
+                return Response({'error': f'Could not delete variable: {str(e)}'}, status=400)
+
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+
+
 @api_view(['GET', 'POST', 'PUT' ,'DELETE'])
 def prices(request, id=None):
     auth_header = request.headers.get('Authorization')
@@ -87,10 +168,10 @@ def prices(request, id=None):
                 data = models.Permisos_precio.objects.get(id=id)
                 data.delete()
                 return Response({'data': f'The price with ID {id} was successfully removed'})
-            except models.Lista_negra.DoesNotExist:
+            except models.Permisos_precio.DoesNotExist:
                 return Response({'error': 'The price does not exist'}, status=404)
             except Exception as e:
-                return Response({'error': f'Could not delete product: {str(e)}'}, status=400)
+                return Response({'error': f'Could not delete prices: {str(e)}'}, status=400)
 
         else:
             return Response({'error': 'The id field is required'}, status=400)

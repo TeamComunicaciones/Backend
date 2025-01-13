@@ -57,6 +57,16 @@ class Permisos_precio(models.Model):
     permiso = models.CharField(max_length=255, unique=True)
     active = models.BooleanField()
 
+class Variables_prices(models.Model):
+    price = models.ForeignKey(Permisos_precio, on_delete=models.CASCADE)
+    name = models.CharField(max_length=20)
+    formula = models.TextField(null=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['price', 'name'], name='unique_price_name')
+        ]
+
 class Permisos_usuarios_precio(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     permiso = models.ForeignKey(Permisos_precio, on_delete=models.CASCADE)
