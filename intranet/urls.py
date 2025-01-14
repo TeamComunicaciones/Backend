@@ -53,4 +53,6 @@ urlpatterns = [
     path('prices/<int:id>/', views.prices),
     path('variables', views.variables_prices),
     path('variables/<int:id>/', views.variables_prices),
+    path('formulas', views.formulas_prices),
+    path('formulas/<int:id>/', views.formulas_prices),
 ]

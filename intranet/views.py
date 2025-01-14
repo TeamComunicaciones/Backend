@@ -35,6 +35,88 @@ import base64
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
+def formulas_prices(request, id=None):
+    auth_header = request.headers.get('Authorization')
+    if auth_header:
+        token = auth_header.split(' ')[1]
+        if not token:
+            raise AuthenticationFailed('You must be logged in.')
+        else:
+            try:
+                payload = jwt.decode(token, 'secret', algorithms='HS256')
+                user_id = User.objects.get(username=payload['id'])
+            except jwt.ExpiredSignatureError:
+                raise AuthenticationFailed('You must be logged in.')
+    else:
+        raise AuthenticationFailed('Authentication token not found.')
+    
+    if request.method == 'GET':
+        if id is not None:
+            try:
+                data = models.Formula.objects.get(id=id)
+            except:
+                raise AuthenticationFailed(f'There is no formula with ID {id}')
+            return Response({
+                'data': {
+                    'id': data.id, 
+                    'name': data.nombre, 
+                    'price': data.price_id.permiso,
+                    'formula': data.formula
+                    }
+                })
+        else:
+            data = models.Formula.objects.all()
+            data_list = [{
+                            'id': i.id, 
+                            'name': i.nombre, 
+                            'price': i.price_id.permiso,
+                            'formula': i.formula
+                        } for i in data]
+            data_list = sorted(data_list, key=lambda x: x['name'].lower())
+            return Response({'data':data_list})
+    elif request.method == 'POST':
+        name = request.data['name']
+        price = request.data['price']
+        formula = request.data['formula']
+        try:
+            price = models.Permisos_precio.objects.get(id=price)
+        except: 
+            pass
+        models.Formula.objects.create(nombre=name, price_id=price, formula=formula, usuario=user_id)
+        return Response({'data':'successful creation'})
+    elif request.method == 'PUT':
+        if id is not None:
+            name = request.data['name']
+            price = request.data['price']
+            formula = request.data['formula']
+            data = models.Formula.objects.get(id=id)
+            data.nombre = name
+            try:
+                price = models.Permisos_precio.objects.get(id=price)
+            except: 
+                pass
+            data.price_id = price
+            data.formula = formula
+            data.save()
+            return Response({'data':'successful edit'})
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+    elif request.method == 'DELETE':
+        if id is not None:
+            try:
+                data = models.Formula.objects.get(id=id)
+                data.delete()
+                return Response({'data': f'The Formula with ID {id} was successfully removed'})
+            except models.Formula.DoesNotExist:
+                return Response({'error': 'The Formula does not exist'}, status=404)
+            except Exception as e:
+                return Response({'error': f'Could not delete Formula: {str(e)}'}, status=400)
+
+        else:
+            return Response({'error': 'The id field is required'}, status=400)
+
+
+@api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def variables_prices(request, id=None):
     auth_header = request.headers.get('Authorization')
     if auth_header:
@@ -54,7 +136,7 @@ def variables_prices(request, id=None):
             try:
                 data = models.Variables_prices.objects.get(id=id)
             except:
-                raise AuthenticationFailed('You must be logged in.')
+                raise AuthenticationFailed(f'There is no variable with ID {id}')
             return Response({
                 'data': {
                     'id': data.id, 
@@ -135,7 +217,7 @@ def prices(request, id=None):
             try:
                 data = models.Permisos_precio.objects.get(id=id)
             except:
-                raise AuthenticationFailed('You must be logged in.')
+                raise AuthenticationFailed(f'There is no price with ID {id}')
             return Response({'data': {'id': data.id, 'name': data.permiso, 'state': data.active}})
         else:
             data = models.Permisos_precio.objects.all()
