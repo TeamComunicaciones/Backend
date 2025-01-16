@@ -85,22 +85,25 @@ def formulas_prices(request, id=None):
         models.Formula.objects.create(nombre=name, price_id=price, formula=formula, usuario=user_id)
         return Response({'data':'successful creation'})
     elif request.method == 'PUT':
-        if id is not None:
-            name = request.data['name']
-            price = request.data['price']
-            formula = request.data['formula']
-            data = models.Formula.objects.get(id=id)
-            data.nombre = name
-            try:
-                price = models.Permisos_precio.objects.get(id=price)
-            except: 
-                pass
-            data.price_id = price
-            data.formula = formula
-            data.save()
-            return Response({'data':'successful edit'})
-        else:
-            return Response({'error': 'The id field is required'}, status=400)
+        try:
+            if id is not None:
+                name = request.data['name']
+                price = request.data['price']
+                formula = request.data['formula']
+                data = models.Formula.objects.get(id=id)
+                data.nombre = name
+                try:
+                    price = models.Permisos_precio.objects.get(id=price)
+                except: 
+                    pass
+                data.price_id = price
+                data.formula = formula
+                data.save()
+                return Response({'data':'successful edit'})
+            else:
+                return Response({'error': 'The id field is required'}, status=400)
+        except Exception as e:
+                return Response({'error': e}, status=400)
     elif request.method == 'DELETE':
         if id is not None:
             try:
