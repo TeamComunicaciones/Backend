@@ -71,8 +71,9 @@ def formulas_prices(request, id=None):
                                 'id': i.id, 
                                 'name': i.nombre, 
                                 'price': i.price_id.permiso,
-                                'formula': i.formula
+                                'formula': ' '.join(ast.literal_eval(i.formula))
                             } for i in data]
+                
                 data_list = sorted(data_list, key=lambda x: x['name'].lower())
                 return Response({'data':data_list})
         elif request.method == 'POST':
@@ -91,6 +92,7 @@ def formulas_prices(request, id=None):
                     name = request.data['name']
                     price = request.data['price']
                     formula = request.data['formula']
+                    formula = str(formula.split(' '))
                     data = models.Formula.objects.get(id=id)
                     data.nombre = name
                     try:
@@ -1233,17 +1235,25 @@ def guardar_formula(request):
 def prueba_formula(request):
     formula = request.data['funtion']
     diccionario = request.data['dic']
-    nombre = request.data['nombre']
-    formula = ' '.join(formula)
+    nombre = request.data['price']
+    if isinstance(formula, list):
+        formula = ' '.join(formula)
+    else:
+        formula = ' '.join(formula.split())
     variables = {k: float(v) for k, v in diccionario.items()}
+    variables2 = models.Variables_prices.objects.filter(price=nombre['id'])
+    variables2 = {variable.name : ' '.join(variable.formula.split()) for variable in variables2}
+    # variables = variables2 | variables
     consulta = models.Formula.objects.filter(nombre='Precio publico').first()
     formula_publico = consulta.formula
     formula_lista = ast.literal_eval(formula_publico)
     formula2 = ' '.join(formula_lista)
+    for key, value in variables2.items():
+        formula = formula.replace(key,value)      
     formula = formula.replace('precioPublico',formula2)
-    formula = formula.replace('=','==')
-    formula = formula.replace('> ==','>=')
-    formula = formula.replace('< ==','<=')
+    # formula = formula.replace('=','==')
+    # formula = formula.replace('> ==','>=')
+    # formula = formula.replace('< ==','<=')
     resultado = eval(formula, variables)
     print(formula)
     print(diccionario)
@@ -1476,6 +1486,7 @@ def login(request):
                 'jwt':token,
             }
             return response
+            return Response({'jwt':token})
         else:
             raise AuthenticationFailed('Clave o contraseña erroneas')
     raise AuthenticationFailed('Solo metodo POST')
@@ -1813,20 +1824,32 @@ def translate_prepago(requests):
                 lista_produtos.append(row['stok'])
                 temp_data =[row['stok']]
                 for precio in precios:
+                    variables2 = models.Variables_prices.objects.filter(price=precio.price_id_id)
+                    variables2 = {variable.name : ' '.join(variable.formula.split()) for variable in variables2}
+                    if precio.price_id_id !=1:
+                        variables1 = models.Variables_prices.objects.filter(price=1)
+                        variables1 = {variable.name : ' '.join(variable.formula.split()) for variable in variables1}
+                        variables2 = variables1 | variables2
                     dict_formula = ast.literal_eval(precio.formula)
                     formula = ' '.join(dict_formula)
                     consulta2 = models.Formula.objects.filter(nombre='Precio publico').first()
                     formula_publico = consulta2.formula
                     formula_lista = ast.literal_eval(formula_publico)
                     formula2 = ' '.join(formula_lista)
+                    if precio.id < 9:
+                        formula = formula.replace('=','==')
+                        formula = formula.replace('> ==','>=')
+                        formula = formula.replace('< ==','<=')
+                        formula = formula.replace('costo','Costo')
+                        formula = formula.replace('valor','<Valor')
+                        formula = formula.replace('descuento','Descuento')
                     formula = formula.replace('precioPublico',formula2)
-                    formula = formula.replace('=','==')
-                    formula = formula.replace('> ==','>=')
-                    formula = formula.replace('< ==','<=')
+                    for key, value in variables2.items():
+                        formula = formula.replace(key,value)      
                     variables = {
-                        'valor':row['valor'],
-                        'costo':row['costo'],
-                        'descuento':row['descuento'],
+                        'Valor':row['valor'],
+                        'Costo':row['costo'],
+                        'Descuento':row['descuento'],
                         'iva': iva,
                         'precioConIva': row['precioConIva']
                     }
