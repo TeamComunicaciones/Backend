@@ -1243,14 +1243,17 @@ def prueba_formula(request):
     variables = {k: float(v) for k, v in diccionario.items()}
     variables2 = models.Variables_prices.objects.filter(price=nombre['id'])
     variables2 = {variable.name : ' '.join(variable.formula.split()) for variable in variables2}
-    # variables = variables2 | variables
+    variables3 = models.Variables_prices.objects.filter(price=1)
+    variables3 = {variable.name : ' '.join(variable.formula.split()) for variable in variables3}
+    variables2 = variables2 | variables3
     consulta = models.Formula.objects.filter(nombre='Precio publico').first()
     formula_publico = consulta.formula
     formula_lista = ast.literal_eval(formula_publico)
     formula2 = ' '.join(formula_lista)
-    for key, value in variables2.items():
-        formula = formula.replace(key,value)      
-    formula = formula.replace('precioPublico',formula2)
+    variables2 = variables2 | {'precioPublico': formula2, 'PrecioPublico': formula2}
+    for i in range(10):
+        for key, value in variables2.items():
+            formula = formula.replace(key,value)    
     # formula = formula.replace('=','==')
     # formula = formula.replace('> ==','>=')
     # formula = formula.replace('< ==','<=')
