@@ -1743,7 +1743,7 @@ def translate_products_prepago(request):
         traduccion = models.Traducciones.objects.filter(equipo = request.data['equipo']).first()
 
         if traduccion:
-            traduccion.stok
+            traduccion.stok = listaStok[0]
             traduccion.iva
             traduccion.active
             traduccion.save()
@@ -1922,6 +1922,7 @@ def lista_productos_prepago(requests):
             'Precio Fintech':'Fintech Zonificacion Subdistribuidores Y Externos',
             'Precio Addi':'Addi',
             'Precio Flamingo':'Flamingo',
+            'Precio Adelantos Valle':'Precio Adelantos Valle',
             'Costo':'Costo',
         }
         lista_precios = []
