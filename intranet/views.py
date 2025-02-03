@@ -1130,7 +1130,7 @@ def excel_precios(request):
         'Cliente 0 A 5 Meses Sin Iva': None,
         'Cliente 6 A 23 Meses Sin Iva': None,
         'Cliente Mayor A 24 Meses Sin Iva': None,
-        'Cliente Descuento Kit Prepago Sin Iva': 'Precio Cliente Kit Prepago',
+        'Cliente Descuento Kit Prepago Sin Iva': 'Descuento Kit',
         'Sistecredito Sin Iva': None,
         'Premium Sin Iva': 'Precio premium',
         'Tramitar Sin Iva': None,
@@ -1144,6 +1144,8 @@ def excel_precios(request):
     cabecera = request.data['cabecera']
     for key, value in titulos_diccionario.items():
         for i in cabecera:
+            if i['text'] == 'Precio Adelantos Valle' or i['text'] == 'Kit Valle':
+                continue
             if value == i['text']:
                 titulos_diccionario[key] = i['value']
                 print('....................................1')
@@ -1761,7 +1763,7 @@ def translate_products_prepago(request):
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
-        iva = 1035430
+        iva = 1095578
         # transnew = models.Traducciones.objects.create(
         #     equipo='equipoejemplo',
         #     stok='stokejemplo',
@@ -1819,6 +1821,9 @@ def translate_prepago(requests):
                 elif 'Precio sub' in i.nombre:
                     cabecera.append({'text':'Kit Sub', 'value':str(contador)})
                     contador += 1
+                elif 'Precio Adelantos Valle' in i.nombre:
+                    cabecera.append({'text':'Kit Valle', 'value':str(contador)})
+                    contador += 1
             cabecera.append({'text':'descuento', 'value':str(contador)})
             lista_produtos = []
             for index, row in nuevo_df.iterrows():
@@ -1847,8 +1852,10 @@ def translate_prepago(requests):
                         formula = formula.replace('valor','<Valor')
                         formula = formula.replace('descuento','Descuento')
                     formula = formula.replace('precioPublico',formula2)
-                    for key, value in variables2.items():
-                        formula = formula.replace(key,value)      
+                    variables2 = variables2 | {'precioPublico':formula2, 'PrecioPublico':formula2, 'Sub': '', 'Premium': '', 'Fintech':'', 'Addi': '', 'Valle': ''}
+                    for i in range(10):
+                        for key, value in variables2.items():
+                            formula = formula.replace(key,value)      
                     variables = {
                         'Valor':row['valor'],
                         'Costo':row['costo'],
@@ -1859,11 +1866,11 @@ def translate_prepago(requests):
                     kit = 0
                     kit_comprobante = False
                     resultado = eval(formula, variables)
-                    if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre:
+                    if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre or 'Precio Adelantos Valle' in precio.nombre:
                         kit_comprobante = True
                         if resultado >= iva and row['valor'] < iva:
-                            kit = resultado - 1032620
-                            resultado = 1032620
+                            kit = resultado - iva
+                            resultado = iva - 2380
                     elif 'Precio sub' in precio.nombre:
                         kit_comprobante = True
                         if resultado < iva and row['valor'] >= iva:
