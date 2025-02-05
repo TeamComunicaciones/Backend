@@ -1868,7 +1868,7 @@ def translate_prepago(requests):
                     resultado = eval(formula, variables)
                     if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre or 'Precio Adelantos Valle' in precio.nombre:
                         kit_comprobante = True
-                        if resultado >= iva and row['valor'] < iva:
+                        if resultado + 2380 >= iva and row['valor'] < iva:
                             kit = resultado - iva
                             resultado = iva - 2380
                     elif 'Precio sub' in precio.nombre:
