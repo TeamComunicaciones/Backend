@@ -1983,7 +1983,7 @@ def lista_productos_prepago(requests):
 
 
         sim = 2000
-        base = 1035430
+        base = 1095578
 
         for index, row in df_resultado.iterrows():
             if precio == 'Costo':
