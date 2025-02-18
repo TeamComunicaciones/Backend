@@ -1996,7 +1996,10 @@ def lista_productos_prepago(requests):
                 new_data.append(tem_data)
             else:
                 valor = row['valor']
-                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
+                if 'Precio Fintech' in row['nombre'] or 'Precio Addi' in row['nombre'] or 'Precio Adelantos Valle' in row['nombre']:
+                    iva = row['valor'] * 0.19 if row['valor'] + 2380 >= base else 0
+                else:
+                    iva = row['valor'] * 0.19 if row['valor'] >= base else 0
                 total = sim * 1.19 + valor + iva
                 tem_data = {
                     'equipo': row['producto'],
