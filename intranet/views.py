@@ -1950,7 +1950,7 @@ def lista_productos_prepago(requests):
         df['valor'] = df['valor'].astype(float)
 
         df_descuentos = df[df['nombre'] == 'descuento']
-        df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates('nombre').reset_index(drop=True)
+        df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).reset_index(drop=True)
         df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
 
         df_filtrado = df[df['nombre'] == precio]
