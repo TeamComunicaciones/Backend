@@ -1973,7 +1973,7 @@ def lista_productos_prepago(requests):
         df_kit_valle = df[df['nombre'] == 'Kit Valle']
         df_kit_valle = df_kit_valle.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_kit_valle = df_kit_valle.rename(columns={'valor': 'kit valle'})
-        df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit valle']], on='producto', how='left')
+        df_resultado = pd.merge(df_resultado, df_kit_valle[['producto', 'kit valle']], on='producto', how='left')
 
 
         df_kit_sub = df[df['nombre'] == 'Kit Sub']
