@@ -1968,6 +1968,12 @@ def lista_productos_prepago(requests):
         df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
         df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
         df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
+        
+        
+        # df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
+        # df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        # df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
+        # df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
 
 
         df_kit_sub = df[df['nombre'] == 'Kit Sub']
@@ -1996,10 +2002,7 @@ def lista_productos_prepago(requests):
                 new_data.append(tem_data)
             else:
                 valor = row['valor']
-                if 'Precio Fintech' in row['nombre'] or 'Precio Addi' in row['nombre'] or 'Precio Adelantos Valle' in row['nombre']:
-                    iva = row['valor'] * 0.19 if row['valor'] + 2380 >= base else 0
-                else:
-                    iva = row['valor'] * 0.19 if row['valor'] >= base else 0
+                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
                 total = sim * 1.19 + valor + iva
                 tem_data = {
                     'equipo': row['producto'],
