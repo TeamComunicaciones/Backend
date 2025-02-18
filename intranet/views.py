@@ -1970,10 +1970,10 @@ def lista_productos_prepago(requests):
         df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
         
         
-        # df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
-        # df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        # df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
-        # df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
+        df_kit_valle = df[df['nombre'] == 'Kit Valle']
+        df_kit_valle = df_kit_valle.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
+        df_kit_valle = df_kit_valle.rename(columns={'valor': 'kit valle'})
+        df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit valle']], on='producto', how='left')
 
 
         df_kit_sub = df[df['nombre'] == 'Kit Sub']
@@ -2021,6 +2021,10 @@ def lista_productos_prepago(requests):
                     total = total + kit
                 elif precio == 'Precio Addi':
                     kit = row['kit addi']
+                    tem_data['KIT'] = kit
+                    total = total + kit
+                elif precio == 'Precio Adelantos Valle':
+                    kit = row['kit valle']
                     tem_data['KIT'] = kit
                     total = total + kit
                 
