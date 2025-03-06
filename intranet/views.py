@@ -363,7 +363,7 @@ def assign_responsible(request):
 def get_image_corresponsal(request):
     tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
     client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-    client_secret = '***REMOVED-MS_OAUTH_SECRET***'
+    client_secret = '***REMOVED-GRAPH_CLIENT_SECRET***'
 
     url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
@@ -450,7 +450,7 @@ def consignacion_corresponsal(request):
         print(usuario.id)
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-        client_secret = '***REMOVED-MS_OAUTH_SECRET***'
+        client_secret = '***REMOVED-GRAPH_CLIENT_SECRET***'
 
         url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
