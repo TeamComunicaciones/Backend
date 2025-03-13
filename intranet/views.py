@@ -30,6 +30,7 @@ from datetime import date
 # import locale
 import string
 import base64
+import random
 
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
@@ -2032,6 +2033,9 @@ def lista_productos_prepago(requests):
                 if precio == 'Precio publico':
                     tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
                 new_data.append(tem_data)
+
+        position = {1:'up', 2: 'down', 3: 'neutral'}
+        new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
 
         return Response({'data' : new_data})
 
