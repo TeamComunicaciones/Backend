@@ -1,4 +1,10 @@
+from rest_framework.decorators import api_view, permission_classes, schema
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.pagination import PageNumberPagination
+from django.shortcuts import get_object_or_404
+from django.db.models import Prefetch
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.http import JsonResponse, HttpResponse
@@ -6,16 +12,13 @@ from django.contrib.auth.models import User
 from rest_framework.decorators import api_view
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
-from rest_framework.response import Response
-from django.shortcuts import render, redirect
-from django.contrib.auth import login, authenticate
-from django.shortcuts import get_object_or_404
 from django.core.exceptions import ObjectDoesNotExist
 from sqlControl.sqlControl import Sql_conexion
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError, DecodeError
 from django.db import IntegrityError
 from django.utils import timezone
-from . import models
 import jwt, datetime
+from django.db.models import Count
 import json
 import pandas as pd
 import numpy as np
@@ -27,11 +30,24 @@ import shutil
 import uuid
 import ast
 from datetime import date
-# import locale
 import string
 import base64
-import random
-
+from drf_yasg.utils import swagger_auto_schema
+from drf_yasg import openapi
+from .models import ActaEntrega
+from .serializers import ActaEntregaSerializer
+from . import models
+from django.contrib.auth import authenticate
+from rest_framework.pagination import PageNumberPagination
+import io
+from .models import ImagenLogin
+from .serializers import ImagenLoginSerializer
+from django.db import transaction
+from django.db.models import Sum
+import traceback
+from django.db.models.functions import TruncDay
+from django.db.models import Q
+from decimal import Decimal
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -122,7 +138,67 @@ def formulas_prices(request, id=None):
             else:
                 return Response({'error': 'The id field is required'}, status=400)
     except Exception as e:
-        return Response({'error': e}, status=400)   
+        return Response({'error': e}, status=400)
+    
+@swagger_auto_schema(
+    method='get',
+    manual_parameters=[
+        openapi.Parameter('Authorization', openapi.IN_HEADER, description="Token de autenticación", type=openapi.TYPE_STRING),
+        openapi.Parameter('id', openapi.IN_QUERY, description="ID de la acta (opcional)", type=openapi.TYPE_INTEGER)
+    ]
+)
+@api_view(['GET', 'POST', 'PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def actas_entrega(request, id=None):
+    try:
+        paginator = PageNumberPagination()
+        paginator.page_size = 10
+
+        if request.method == 'GET':
+            if id:
+                acta = get_object_or_404(
+                    ActaEntrega.objects.prefetch_related(
+                        Prefetch('actaobjetivo_set'),
+                        Prefetch('actaobservacion_set'),
+                        Prefetch('actarecibidopor_set'),
+                        Prefetch('actaarchivo_set')
+                    ), 
+                    id=id
+                )
+                serializer = ActaEntregaSerializer(acta)
+                return Response(serializer.data)
+            else:
+                actas = ActaEntrega.objects.all().order_by('-created_at')
+                result_page = paginator.paginate_queryset(actas, request)
+                serializer = ActaEntregaSerializer(result_page, many=True)
+                return paginator.get_paginated_response(serializer.data)
+
+        elif request.method == 'POST':
+            serializer = ActaEntregaSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message': 'Acta creada exitosamente', 'data': serializer.data}, status=201)
+            return Response({'errors': serializer.errors}, status=400)
+
+        elif request.method == 'PUT':
+            if not id:
+                return Response({'error': 'ID requerido para actualizar'}, status=400)
+            acta = get_object_or_404(ActaEntrega, id=id)
+            serializer = ActaEntregaSerializer(acta, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({'message': 'Acta actualizada correctamente', 'data': serializer.data})
+            return Response({'errors': serializer.errors}, status=400)
+
+        elif request.method == 'DELETE':
+            if not id:
+                return Response({'error': 'ID requerido para eliminar'}, status=400)
+            acta = get_object_or_404(ActaEntrega, id=id)
+            acta.delete()
+            return Response({'message': 'Acta eliminada exitosamente'}, status=204)
+
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def variables_prices(request, id=None):
@@ -265,7 +341,168 @@ def prices(request, id=None):
 
         else:
             return Response({'error': 'The id field is required'}, status=400)
+        
+@api_view(['GET'])
+def get_filtros_precios(request):
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return Response({'detail': 'Token no proporcionado.'}, status=401)
+        
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload.get('id'))
 
+        permisos_por_usuario = {
+            '33333': ['Precio publico', 'Precio Fintech', 'Precio Addi'],
+            '44444': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio premium', 'Precio Addi'],
+            '11111': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio Addi'],
+            '22222': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio Addi', 'Precio Adelantos Valle']
+        }
+        
+        todas_las_listas_map = {
+            "Precio publico": "Precio Público", "Precio sub": "Subdistribuidor", "Precio premium": "Premium",
+            "Precio Fintech": "Fintech", "Precio Addi": "Addi", "Precio Flamingo": "Flamingo",
+            "Costo": "Costo", "Precio Adelantos Valle": "Adelantos Valle"
+        }
+
+        lista_precios_final = []
+        if usuario.username in permisos_por_usuario:
+            listas_permitidas_ids = permisos_por_usuario[usuario.username]
+            lista_precios_final = [{'id': id_lista, 'nombre': todas_las_listas_map[id_lista]} for id_lista in listas_permitidas_ids if id_lista in todas_las_listas_map]
+        else:
+            lista_precios_final = [{'id': k, 'nombre': v} for k, v in todas_las_listas_map.items()]
+
+        productos = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
+        marcas = sorted(list(set([p.split(' ')[0].upper() for p in productos if p])))
+        fechas = models.Lista_precio.objects.dates('dia', 'day', order='DESC')
+        
+        return Response({
+            'listas_precios': lista_precios_final,
+            'marcas': marcas,
+            'fechas_validas': fechas
+        })
+    except Exception as e:
+        return Response({'detail': f'Error interno en get_filtros_precios: {str(e)}'}, status=500)
+
+@api_view(['POST'])
+def buscar_precios(request):
+    try:
+        filtros = request.data.get('filtros', {})
+        listas_seleccionadas = filtros.get('listas_precios', [])
+        marcas_seleccionadas = filtros.get('marcas', [])
+        fecha_especifica_str = filtros.get('fecha_especifica')
+        filtro_variacion = filtros.get('filtro_variacion')
+        filtro_promo = filtros.get('filtro_promo', False)
+
+        qs = models.Lista_precio.objects.all().order_by('producto', 'nombre', '-dia')
+
+        if listas_seleccionadas:
+            qs = qs.filter(nombre__in=listas_seleccionadas)
+        if marcas_seleccionadas:
+            query_marcas = Q()
+            for marca in marcas_seleccionadas:
+                query_marcas |= Q(producto__istartswith=marca)
+            qs = qs.filter(query_marcas)
+
+        df = pd.DataFrame(list(qs.values('id', 'producto', 'nombre', 'valor', 'dia')))
+        if df.empty: return Response({'data': [], 'fecha_actual': 'N/A'})
+            
+        fecha_carga = None
+        if fecha_especifica_str:
+            fecha_especifica = datetime.datetime.strptime(fecha_especifica_str, '%Y-%m-%d').date()
+            fecha_carga = fecha_especifica
+            df['dia'] = pd.to_datetime(df['dia']).dt.date
+            
+            # --- CORRECCIÓN 1 AQUÍ ---
+            df_actual = df[df['dia'] <= fecha_especifica].drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
+            
+            ids_actuales = df_actual['id'].tolist()
+            productos_actuales = df_actual['producto'].tolist()
+            precios_anteriores = models.Lista_precio.objects.filter(producto__in=productos_actuales, dia__lt=fecha_especifica).exclude(id__in=ids_actuales).order_by('producto', '-dia')
+            df_anterior = pd.DataFrame(list(precios_anteriores.values('producto', 'valor')))
+            if not df_anterior.empty:
+                df_anterior = df_anterior.drop_duplicates('producto', keep='first').rename(columns={'valor': 'valor_anterior'})
+                df_final = pd.merge(df_actual, df_anterior, on='producto', how='left')
+            else:
+                df_final = df_actual; df_final['valor_anterior'] = 0
+        else:
+            fecha_carga = df['dia'].max().date()
+            df['valor_anterior'] = df.groupby(['producto', 'nombre'])['valor'].shift(-1)
+            
+            # --- CORRECCIÓN 2 AQUÍ ---
+            df_final = df.drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
+        
+        df_final.fillna({'valor_anterior': 0}, inplace=True)
+        df_final.rename(columns={'valor': 'valor_actual'}, inplace=True)
+
+        kit_list_names = ['descuento', 'Kit Sub', 'Kit Fintech', 'Kit Addi', 'Kit Valle']
+        productos_en_resultado = df_final['producto'].unique().tolist()
+
+        precios_kits_qs = models.Lista_precio.objects.filter(
+            producto__in=productos_en_resultado,
+            nombre__in=kit_list_names
+        ).order_by('producto', 'nombre', '-dia')
+        
+        df_kits = pd.DataFrame(list(precios_kits_qs.values('producto', 'nombre', 'valor', 'dia')))
+
+        if not df_kits.empty:
+            latest_kits = df_kits.drop_duplicates(subset=['producto', 'nombre'], keep='first')
+            df_kits_pivot = latest_kits.pivot_table(index='producto', columns='nombre', values='valor').reset_index()
+            df_final = pd.merge(df_final, df_kits_pivot, on='producto', how='left')
+
+        kit_column_names = [name.replace(' ', '_') for name in kit_list_names]
+        
+        rename_dict = {name: name.replace(' ', '_') for name in kit_list_names if name in df_final.columns}
+        if rename_dict:
+            df_final.rename(columns=rename_dict, inplace=True)
+        
+        for col in kit_column_names:
+            if col not in df_final.columns:
+                df_final[col] = 0.0
+        
+        df_final.fillna(0, inplace=True)
+
+        df_final['variation'] = df_final.apply(calcular_variacion, axis=1)
+        df_final['indicador'] = df_final['variation'].apply(lambda x: x.get('indicador'))
+        df_final['Promo'] = df_final['descuento'] > 0
+        
+        if filtro_variacion: df_final = df_final[df_final['indicador'] == filtro_variacion]
+        if filtro_promo: df_final = df_final[df_final['Promo'] == True]
+
+        new_data = []
+        sim, base = Decimal('2000'), Decimal('1095578')
+        for _, row in df_final.iterrows():
+            valor_actual = Decimal(row.get('valor_actual', 0))
+            iva = valor_actual * Decimal('0.19') if valor_actual >= base else Decimal('0')
+            total = sim * Decimal('1.19') + valor_actual + iva
+            
+            kits_aplicados = []
+            for col_name in kit_column_names:
+                if col_name != 'descuento' and row.get(col_name, 0) > 0:
+                    kit_val = Decimal(row.get(col_name))
+                    kits_aplicados.append({'nombre': col_name.replace('_', ' ').capitalize(), 'valor': float(kit_val)})
+                    total += kit_val
+
+            tem_data = {
+                'equipo': row.get('producto'), 'nombre_lista': row.get('nombre'),
+                'precio simcard': float(sim), 'IVA simcard': float(sim * Decimal('0.19')),
+                'equipo sin IVA': float(valor_actual), 'IVA equipo': float(iva), 'total': float(total),
+                'valor_anterior': float(row.get('valor_anterior', 0)), 'indicador': row.get('variation').get('indicador'),
+                'diferencial': row.get('variation').get('diferencial'), 'porcentaje': row.get('variation').get('porcentaje'),
+                'kits': kits_aplicados
+            }
+            if row.get('Promo'): tem_data['Promo'] = 'PROMO'
+            new_data.append(tem_data)
+
+        return Response({
+            'data': new_data,
+            'fecha_actual': fecha_carga.strftime('%d de %B de %Y') if fecha_carga else "Varias Fechas"
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return Response({'error': f'Error interno: {str(e)}'}, status=500)
+    
 @api_view(['GET', 'POST', 'DELETE'])
 def black_list(request, id=None):
     if request.method == 'GET':
@@ -311,39 +548,67 @@ def black_list(request, id=None):
 
 
 @api_view(['POST'])
+@transaction.atomic
 def settle_invoice(request):
-    total = request.data['total']
-    saldar = request.data['saldar']
-    seleccionados = request.data['seleccionados']
-    fecha = request.data['fecha']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        fecha = fecha + "-01"
-    token = request.data['jwt']
-    sucursal = request.data['sucursal']
-    sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
-    payload = jwt.decode(token, 'secret', algorithms='HS256')
-    usuario = User.objects.get(username=payload['id'])
-    referencias = []
-    for select in seleccionados:
-        referencias.append(f"{select['id']}")
-        consignacion = models.Corresponsal_consignacion.objects.get(id=select['id'])
-        consignacion.estado = 'saldado'
-        consignacion.save()
-    referencias_text = '-'.join(referencias) if len(referencias) > 1 else f"{referencias[0]}"
-    models.Corresponsal_consignacion.objects.create(
-            valor = total,
-            banco = 'Corresponsal Banco de Bogota',
-            fecha_consignacion = datetime.datetime.strptime(saldar['fechaConsignacion'], '%Y-%m-%d').date(),
-            fecha = datetime.datetime.strptime(fecha, '%Y-%m-%d').date(),
-            responsable = usuario.id,
-            estado = 'Conciliado',
-            detalle = saldar['detalle'],
-            url = '',
-            codigo_incocredito = sucursal_id.terminal,
-            detalle_banco = referencias_text,
+    try:
+        consignacion_ids = request.data.get('ids', [])
+        saldar_data = request.data.get('saldar_data', {})
+        jwt_token = request.data.get('jwt')
+        sucursal_code = request.data.get('sucursal')
+        fecha_str = request.data.get('fecha')
+
+        if not all([consignacion_ids, saldar_data, jwt_token, sucursal_code, fecha_str]):
+            return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
+
+        payload = jwt.decode(jwt_token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload['id'])
+        
+        sucursal_obj = models.Codigo_oficina.objects.get(codigo=sucursal_code)
+
+        consignaciones_a_saldar = models.Corresponsal_consignacion.objects.filter(
+            id__in=consignacion_ids, 
+            estado='pendiente'
         )
-    return Response([])
+
+        if len(consignaciones_a_saldar) != len(consignacion_ids):
+             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
+
+        total_calculado = sum(c.valor for c in consignaciones_a_saldar)
+
+        for consignacion in consignaciones_a_saldar:
+            consignacion.estado = 'saldado'
+            consignacion.save()
+
+        if len(fecha_str) == 7:
+            fecha_obj = datetime.datetime.strptime(fecha_str + "-01", '%Y-%m-%d').date()
+        else:
+            fecha_obj = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+
+        referencias_text = ','.join(map(str, consignacion_ids))
+
+        models.Corresponsal_consignacion.objects.create(
+            valor=total_calculado,
+            banco='Corresponsal Banco de Bogota',
+            fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
+            fecha=fecha_obj,
+            responsable=usuario.id,
+            estado='Conciliado',
+            detalle=saldar_data['detalle'],
+            url='',
+            codigo_incocredito=sucursal_obj.terminal,
+            detalle_banco=referencias_text,
+        )
+
+        return Response({'detail': 'Consignaciones saldadas correctamente.'}, status=200)
+
+    except User.DoesNotExist:
+        return Response({'detail': 'El usuario del token no es válido.'}, status=401)
+    except models.Codigo_oficina.DoesNotExist:
+        return Response({'detail': 'La sucursal especificada no existe.'}, status=404)
+    except Exception as e:
+        print(f"ERROR en settle_invoice: {str(e)}")
+        return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
+
 
 @api_view(['POST'])
 def assign_responsible(request):
@@ -410,93 +675,201 @@ def get_image_corresponsal(request):
 
 @api_view(['POST'])
 def select_consignaciones_corresponsal_cajero(request):
-    fecha = request.data['fecha']
-    sucursal = request.data['sucursal']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
-        else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
-    else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+    try:
+        fecha_str = request.data['fecha']
+        sucursal = request.data['sucursal']
 
-    transacciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal)
-    transacciones_data = []
-    total_datos = 0
-    data_transacciones = []
-    for t in transacciones:
-            total_datos = total_datos + t.valor
+        if len(fecha_str) == 7:
+            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
+            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
+        else:
+            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
+            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+
+        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+        fecha_fin = timezone.make_aware(fecha_fin_naive)
+
+        transacciones = models.Corresponsal_consignacion.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin), 
+            codigo_incocredito=sucursal
+        )
+
+        total_datos = 0
+        data_transacciones = []
+
+        for t in transacciones:
+            total_datos += t.valor
             data_transacciones.append({
+                'id': t.id,
                 'banco': t.banco,
                 'url': t.url,
-                'valor': f"${t.valor:,.2f}",
+                'valor': t.valor,
+                'estado': getattr(t, 'estado', ''),
             })
-    return Response({'total': f"${total_datos:,.2f}", 'detalles': data_transacciones})
+            
+        return Response({'total': total_datos, 'detalles': data_transacciones})
+
+    except Exception as e:
+        print(f"Error en select_consignaciones_corresponsal_cajero: {e}")
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+
+@api_view(['GET'])
+def historico_pendientes_cajero(request):
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return Response({'detail': 'Token no proporcionado.'}, status=401)
+            
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload['id'])
+
+        responsable = models.Responsable_corresponsal.objects.filter(user=usuario).first()
+        if not responsable or not responsable.sucursal:
+            return Response({'error': 'Usuario no asignado a sucursal.'}, status=404)
+        
+        sucursal_terminal = responsable.sucursal.terminal
+        sucursal_obj = models.Codigo_oficina.objects.filter(terminal=sucursal_terminal).first()
+        if not sucursal_obj:
+            return Response({'error': 'Código de sucursal no encontrado.'}, status=404)
+
+        hoy = timezone.now().date()
+        inicio_rango = hoy - datetime.timedelta(days=45)
+
+        transacciones_diarias = models.Transacciones_sucursal.objects.filter(
+            codigo_incocredito=sucursal_obj.codigo,
+            fecha__range=(inicio_rango, hoy)
+        ).annotate(dia=TruncDay('fecha')).values('dia').annotate(total_cajero=Sum('valor')).order_by('dia')
+
+        consignaciones_diarias = models.Corresponsal_consignacion.objects.filter(
+            codigo_incocredito=sucursal_terminal,
+            fecha__range=(inicio_rango, hoy)
+        ).annotate(dia=TruncDay('fecha')).values('dia').annotate(total_consignado=Sum('valor')).order_by('dia')
+
+        df_transacciones = pd.DataFrame(list(transacciones_diarias))
+        df_consignaciones = pd.DataFrame(list(consignaciones_diarias))
+
+        if 'dia' in df_transacciones: df_transacciones['dia'] = pd.to_datetime(df_transacciones['dia']).dt.date
+        if 'dia' in df_consignaciones: df_consignaciones['dia'] = pd.to_datetime(df_consignaciones['dia']).dt.date
+
+        if df_transacciones.empty and df_consignaciones.empty:
+            return Response({'total_general': 0, 'detalles': []})
+
+        if not df_transacciones.empty and not df_consignaciones.empty:
+            df_merged = pd.merge(df_transacciones, df_consignaciones, on='dia', how='outer')
+        elif not df_transacciones.empty:
+            df_merged = df_transacciones
+        else:
+            df_merged = df_consignaciones
+
+        df_merged.fillna(0, inplace=True)
+        
+        if 'total_cajero' not in df_merged.columns: df_merged['total_cajero'] = 0
+        if 'total_consignado' not in df_merged.columns: df_merged['total_consignado'] = 0
+        
+        df_merged['pendiente_dia'] = df_merged['total_cajero'] - df_merged['total_consignado']
+        
+        df_pendientes = df_merged[df_merged['pendiente_dia'] != 0].copy()
+        total_general_pendiente = df_pendientes['pendiente_dia'].sum()
+        df_pendientes.rename(columns={'dia': 'fecha'}, inplace=True)
+        detalles_pendientes = df_pendientes[['fecha', 'pendiente_dia']].to_dict('records')
+
+        return Response({
+            'total_general': float(total_general_pendiente),
+            'detalles': detalles_pendientes
+        })
+
+    except jwt.ExpiredSignatureError:
+        return Response({'detail': 'Token ha expirado.'}, status=401)
+    except User.DoesNotExist:
+        return Response({'detail': 'Usuario del token no es válido.'}, status=401)
+    except Exception as e:
+        print(f"Error en historico_pendientes_cajero: {str(e)}")
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+
+
+def generate_unique_filename(original_name):
+    import uuid
+    from pathlib import Path
+    extension = Path(original_name).suffix
+    return f"{uuid.uuid4()}{extension}"
 
 @api_view(['POST'])
 def consignacion_corresponsal(request):
     if request.method == 'POST':
-        data = request.data
-        token = request.data['jwt']
-        image = request.FILES['image']
-        sucursal = request.data['sucursal']
-        # sucursal_id = models.Codigo_oficina.objects.get(codigo=sucursal)
-        consignacion_data = json.loads(request.POST.get('data'))
-        payload = jwt.decode(token, 'secret', algorithms='HS256')
-        usuario = User.objects.get(username=payload['id'])
-        print(usuario.id)
-        tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-        client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-        client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+        try:
+            data = request.data
+            token = data.get('jwt')
+            image = request.FILES.get('image')
+            sucursal = data.get('sucursal')
+            consignacion_data = json.loads(request.POST.get('data'))
+            fecha_reporte = datetime.datetime.strptime(data.get('fecha'), '%Y-%m-%d').date()
 
-        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            if not all([token, image, sucursal, consignacion_data]):
+                return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
 
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            usuario = User.objects.get(username=payload['id'])
 
-        data2 = {
-            'grant_type': 'client_credentials',
-            'client_id': client_id,
-            'client_secret': client_secret,
-            'scope': 'https://graph.microsoft.com/.default'
-        }
+            tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+            client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+            client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+            url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+            data_ms = {
+                'grant_type': 'client_credentials', 'client_id': client_id,
+                'client_secret': client_secret, 'scope': 'https://graph.microsoft.com/.default'
+            }
+            response_ms = requests.post(url, headers=headers, data=data_ms)
+            response_ms.raise_for_status()
+            access_token = response_ms.json().get('access_token')
 
-        response = requests.post(url, headers=headers, data=data2)
+            headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
+            site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+            file_name = generate_unique_filename(image.name)
+            upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+            response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
+            response_upload.raise_for_status()
 
-        if response.status_code == 200:
-            access_token = response.json().get('access_token')
-        else:
-            raise AuthenticationFailed(f"Error getting access token")
-        
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/octet-stream'
-        }
-        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'  # Reemplaza con tu site-id
-        file_name = generate_unique_filename(image.name)
-        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
-        response = requests.put(upload_url, headers=headers, data=image.read())
-        estado = 'saldado' if consignacion_data.get('banco') == 'Corresponsal Banco de Bogota' else 'pendiente'
-        detalle = consignacion_data.get('detalle') if consignacion_data.get('banco') != 'Otros bancos' else consignacion_data.get('bancoDetalle')
-        models.Corresponsal_consignacion.objects.create(
-            valor = consignacion_data.get('valor'),
-            banco = consignacion_data.get('banco'),
-            fecha_consignacion = datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-            fecha = datetime.datetime.strptime(data['fecha'], '%Y-%m-%d').date(),
-            responsable = usuario.id,
-            estado = estado,
-            detalle = detalle,
-            url = file_name,
-            codigo_incocredito = sucursal,
-            detalle_banco = consignacion_data.get('proveedor'),
-        )
-        print(data['data'])
-        return Response([])
+            banco_categoria = consignacion_data.get('banco')
+            
+            
+            estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
+
+            detalle_banco_valor = None
+            if banco_categoria in ['Proveedores', 'Obligaciones financieras']:
+                detalle_banco_valor = consignacion_data.get('proveedor')
+            elif banco_categoria == 'Otros bancos':
+                detalle_banco_valor = consignacion_data.get('bancoDetalle')
+            elif banco_categoria == 'Impuestos':
+                detalle_banco_valor = consignacion_data.get('impuestoDetalle')
+
+            models.Corresponsal_consignacion.objects.create(
+                valor=consignacion_data.get('valor'),
+                banco=banco_categoria,
+                fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+                fecha=fecha_reporte,
+                responsable=usuario.id,
+                estado=estado,
+                detalle=consignacion_data.get('detalle'),
+                url=file_name,
+                codigo_incocredito=sucursal,
+                detalle_banco=detalle_banco_valor,
+                min=consignacion_data.get('min') if banco_categoria == 'Venta doble proposito' else None,
+                imei=consignacion_data.get('imei') if banco_categoria == 'Venta doble proposito' else None,
+                planilla=consignacion_data.get('planilla') if banco_categoria == 'Venta doble proposito' else None,
+            )
+
+            return Response({'detail': 'Consignación registrada correctamente'}, status=200)
+            
+        except User.DoesNotExist:
+            return Response({'detail': 'Usuario no válido'}, status=401)
+        except requests.exceptions.RequestException as e:
+            return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
+        except Exception as e:
+            print(f"ERROR en consignacion_corresponsal: {str(e)}")
+            return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
+
 
 @api_view(['GET', 'POST', 'PUT'])
 def lista_usuarios(request):
@@ -529,301 +902,364 @@ def lista_usuarios(request):
 
 @api_view(['POST'])
 def encargados_corresponsal(request):
-    sucursales = models.Codigo_oficina.objects.all()
-    sucursales = [i.terminal for i in sucursales]
-    sucursales.sort()
-    responsables = models.Responsable_corresponsal.objects.all()
-    responsables = {i.sucursal.terminal: f'{i.user.username}-{i.user.first_name}-{i.user.last_name}' for i in responsables}
-    users = User.objects.all()
-    users_list = [f'{i.username}-{i.first_name}-{i.last_name}' for i in users]
-    users_options = [{'value':f'{i.username}-{i.first_name}-{i.last_name}', 'text':f'{i.username}-{i.first_name}-{i.last_name}'} for i in users if i.username != 'sebasmoncada']
+    sucursales = models.Codigo_oficina.objects.values_list('terminal', flat=True).order_by('terminal')
+    
+    responsables_qs = models.Responsable_corresponsal.objects.select_related('user', 'sucursal').all()
+    
+    responsables = {
+        i.sucursal.terminal: f"{i.user.username}-{i.user.first_name}-{i.user.last_name}"
+        for i in responsables_qs
+    }
+    
+    users = User.objects.values('username', 'first_name', 'last_name')
+    
+    users_list = []
+    users_options = []
+    for i in users:
+        user_string = f"{i['username']}-{i['first_name']}-{i['last_name']}"
+        users_list.append(user_string)
+        if i['username'] != 'sebasmoncada':
+            users_options.append({'value': user_string, 'text': user_string})
+
     data = {
-        'sucursales': sucursales,
+        'sucursales': list(sucursales),
         'users': users_list,
-        'users_options': users_options,
+        'users_options': users_options, 
         'responsables': responsables,
     }
     return Response(data)
 
 @api_view(['POST'])
 def resumen_corresponsal(request):
-    fecha = request.data['fecha']
-    sucursal = request.data['sucursal']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+    try:
+        fecha_str = request.data.get('fecha')
+        sucursal_code = request.data.get('sucursal')
+
+        if not fecha_str:
+            return Response({'error': 'Fecha requerida'}, status=400)
+
+        if len(fecha_str) == 7:
+            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
+            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
         else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
-    else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=sucursal )
-    valor_total = 0
-    for i in transacciones:
-        valor_total = valor_total + i.valor
-    nombre_sucursal = models.Codigo_oficina.objects.get(codigo=sucursal).terminal
-    transacciones2 = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=nombre_sucursal)
-    total_datos2 = 0
-    pendientes = 0
-    transacciones_data = []
-    usuarios = User.objects.all()
-    dic_usuarios = { i.id: i.username for i in usuarios}
-    for t in transacciones2:
-            transacciones_data.append({
-                'id': t.id,
-                'valor' : f"${t.valor:,.2f}",
-                'banco' : t.banco,
-                'fecha_consignacion' : t.fecha_consignacion,
-                'fecha' : t.fecha,
-                'responsable' : dic_usuarios[int(t.responsable)],
-                'estado' : t.estado,
-                'detalle' : t.detalle,
-                'url': t.url
-            })
-            if t.estado == 'pendiente':
-                pendientes = pendientes + t.valor
-            elif t.estado == 'saldado':
-                total_datos2 = total_datos2 + t.valor
+            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
+            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+
+        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+        fecha_fin = timezone.make_aware(fecha_fin_naive)
+        
+        usuarios_dict = {user.id: user.username for user in User.objects.all()}
+
+        consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin)
+        )
+
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin)
+        )
+        
+        if sucursal_code and sucursal_code not in ['0', '-1']:
+            sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
+            if sucursal_obj:
+                consignaciones_qs = consignaciones_qs.filter(codigo_incocredito=sucursal_obj.terminal)
+                transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
+                titulo = sucursal_obj.terminal
             else:
-                pass
-    sucursal_codigo = models.Codigo_oficina.objects.filter(codigo=sucursal).first()
-    df_consolidado = pd.DataFrame(transacciones_data)
-    consolidado = df_consolidado.to_html(classes='table table-striped', index=False)
-    data = {
-        'valor':f"${valor_total:,.2f}", 
-        'titulo':sucursal_codigo.terminal,
-        'consignacion': f"${total_datos2:,.2f}",
-        'pendiente': f"${pendientes:,.2f}",
-        'restante':f"${valor_total - total_datos2 - pendientes:,.2f}",
-        'consignaciones': transacciones_data
-    }
-    return Response(data)
+                titulo = 'Sucursal Desconocida'
+        else:
+            titulo = 'Todas las sucursales'
+
+        transacciones_data = []
+        for t in consignaciones_qs:
+            banco = getattr(t, 'banco', '')
+            detalle_categoria = getattr(t, 'detalle_banco', '') or ''
+            if banco == 'Venta doble proposito':
+                imei = getattr(t, 'imei', '') or ''
+                if imei:
+                    detalle_categoria = f"IMEI: {imei}"
+
+            responsable_id = getattr(t, 'responsable', None)
+            responsable_username = 'Desconocido'
+            if responsable_id:
+                try:
+                    responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
+                except (ValueError, TypeError):
+                    pass
+
+            transacciones_data.append({
+                'id': t.id, 'valor': getattr(t, 'valor', 0) or 0,
+                'banco': banco, 'fecha_consignacion': t.fecha_consignacion,
+                'responsable': responsable_username, 'estado': getattr(t, 'estado', ''),
+                'detalle': getattr(t, 'detalle', '') or '',
+                'sucursal_nombre': getattr(t, 'codigo_incocredito', ''),
+                'detalle_categoria': detalle_categoria,
+                'url': getattr(t, 'url', None),
+            })
+
+        valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
+        total_consignado = sum(t['valor'] for t in transacciones_data if t['estado'] in ['saldado', 'Conciliado'])
+        total_pendiente = sum(t['valor'] for t in transacciones_data if t['estado'] == 'pendiente')
+        
+        data = {
+            'valor': valor_total_cajero,
+            'titulo': titulo,
+            'consignacion': total_consignado,
+            'pendiente': total_pendiente,
+            'consignaciones': transacciones_data
+        }
+        return Response(data)
+
+    except Exception as e:
+        print(f"ERROR en resumen_corresponsal: {str(e)}")
+        return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
+
 
 @api_view(['POST'])
 def select_datos_corresponsal(request):
-    fecha = request.data['fecha']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
-        else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
+    import datetime
+    import pandas as pd
+    from django.utils import timezone
+    from django.db.models import Sum
+
+    fecha = request.data.get('fecha')
+    if not fecha:
+        return Response({'error': 'Fecha requerida'}, status=400)
+
+    if len(fecha) == 7:
+        fecha_inicio_naive = pd.to_datetime(fecha).to_pydatetime()
+        fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
     else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_inicio_naive = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+
+    fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+    fecha_fin = timezone.make_aware(fecha_fin_naive)
+
     transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    transacciones_data = []
-    for t in transacciones:
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': t.valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
+    transacciones_data = list(transacciones.values())
+
     sucursales = models.Codigo_oficina.objects.all()
-    cod_sucursales = {i.codigo: i.terminal for i in sucursales} 
-    sucursales_dict = [{'value':i.codigo,'text':i.terminal} for i in sucursales]
+    sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
+    
+    if not transacciones_data:
+        return Response({
+            'consolidado': [],
+            'sucursales': sucursales_dict,
+            'data': []
+        })
+
     df_transacciones = pd.DataFrame(transacciones_data)
-    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales)
-    df_transacciones['cuenta'] = 1
-    df_consolidado = df_transacciones.groupby(['codigo_incocredito']).agg({'cuenta':'sum', 'valor':'sum'}).reset_index()
-    if tamaño_fecha == 7:
-        fecha_inicio = timezone.make_aware(fecha_inicio, timezone.get_current_timezone())
-        fecha_fin = timezone.make_aware(fecha_fin, timezone.get_current_timezone())
-    consignaciones = models.Corresponsal_consignacion.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
-    consignaciones_data = []
-    for i in consignaciones:
-            consignaciones_data.append({
-                'codigo_incocredito': i.codigo_incocredito,
-                'estado': i.estado,
-                'valor': i.valor,
-            })
-    if len(consignaciones_data) > 0:
-        df_consignaciones = pd.DataFrame(consignaciones_data)
-        df_consignaciones = df_consignaciones.pivot_table(
-            index='codigo_incocredito', 
-            columns='estado', 
-            values='valor', 
+    df_transacciones['valor'] = pd.to_numeric(df_transacciones['valor'], errors='coerce').fillna(0)
+    
+    cod_sucursales_map = {i.codigo: i.terminal for i in sucursales}
+    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales_map)
+
+    df_consolidado = df_transacciones.groupby('codigo_incocredito').agg(
+        cuenta=('codigo_incocredito', 'size'),
+        valor=('valor', 'sum')
+    ).reset_index()
+
+    consignaciones_qs = models.Corresponsal_consignacion.objects.filter(fecha_consignacion__range=(fecha_inicio, fecha_fin))
+    
+    if consignaciones_qs.exists():
+        df_consignaciones = pd.DataFrame(list(consignaciones_qs.values('codigo_incocredito', 'estado', 'valor')))
+        df_consignaciones['valor'] = pd.to_numeric(df_consignaciones['valor'], errors='coerce').fillna(0)
+        
+        df_consignaciones_pivot = df_consignaciones.pivot_table(
+            index='codigo_incocredito',
+            columns='estado',
+            values='valor',
             aggfunc='sum'
         ).reset_index()
-        df_consignaciones = df_consignaciones.fillna(0)
-        df_consolidado = pd.merge(df_consolidado, df_consignaciones, on='codigo_incocredito', how='outer')
+
+        df_consolidado = pd.merge(df_consolidado, df_consignaciones_pivot, on='codigo_incocredito', how='outer').fillna(0)
+    else:
+        df_consolidado['pendiente'] = 0
+        df_consolidado['saldado'] = 0
+        df_consolidado['Conciliado'] = 0
+
+    for col in ['pendiente', 'saldado', 'Conciliado']:
+        if col not in df_consolidado.columns:
+            df_consolidado[col] = 0
+
+    df_consolidado['saldado'] = df_consolidado['saldado'] + df_consolidado['Conciliado']
+    df_consolidado['restante'] = df_consolidado['valor'] - df_consolidado['pendiente'] - df_consolidado['saldado']
     
-    df_consolidado = df_consolidado.fillna(0)
-    df_consolidado['valor'] = df_consolidado['valor'].apply(lambda x: f"${x:,.2f}")
-    if 'pendiente' in df_consolidado.columns:
-        df_consolidado['pendiente'] = df_consolidado['pendiente'].apply(lambda x: f"${x:,.2f}")
-    if 'saldado' in df_consolidado.columns:
-        df_consolidado['saldado'] = df_consolidado['saldado'].apply(lambda x: f"${x:,.2f}")
-    consolidado = df_consolidado.to_dict(orient='records')
-    data_excel = [i | {'sucursal': cod_sucursales[i['codigo_incocredito']]} for i in transacciones_data]
-    return Response({'consolidado': consolidado, 'sucursales': sucursales_dict, 'data': data_excel })
+    columnas_finales = ['codigo_incocredito', 'cuenta', 'valor', 'pendiente', 'saldado', 'restante']
+    consolidado = df_consolidado[columnas_finales].to_dict(orient='records')
+    
+    return Response({
+        'consolidado': consolidado,
+        'sucursales': sucursales_dict,
+        'data': transacciones_data
+    })
+
+
+
 
 @api_view(['POST'])
 def select_datos_corresponsal_cajero(request):
-    fecha = request.data['fecha']
-    token = request.data['jwt']
-    payload = jwt.decode(token, 'secret', algorithms='HS256')
-    user = User.objects.get(username = payload['id'])
-    sucursales = models.Responsable_corresponsal.objects.all()
-    sucursal = ''
-    for i in sucursales:
-        if i.user.username == user.username:
-            sucursal = i.sucursal.terminal
-            break
-    # sucursal = request.data['sucursal']
-    tamaño_fecha = len(fecha)
-    if tamaño_fecha == 7:
-        año, mes = map(int, fecha.split('-'))
-        fecha_inicio = datetime.datetime(año, mes, 1)
-        if mes == 12:
-            fecha_fin = datetime.datetime(año + 1, 1, 1) - datetime.timedelta(seconds=1)
+    try:
+        fecha_str = request.data['fecha']
+        token = request.data['jwt']
+        
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        user = User.objects.get(username=payload['id'])
+
+        responsable = models.Responsable_corresponsal.objects.filter(user=user).first()
+        if not responsable or not responsable.sucursal:
+            return Response({'error': 'Usuario no asignado a una sucursal válida.'}, status=404)
+        
+        sucursal_terminal = responsable.sucursal.terminal
+
+        sucursal_obj = models.Codigo_oficina.objects.filter(terminal=sucursal_terminal).first()
+        if not sucursal_obj:
+            return Response({'error': f'El código para la sucursal {sucursal_terminal} no fue encontrado.'}, status=404)
+        
+        codigo_sucursal = sucursal_obj.codigo
+        
+        if len(fecha_str) == 7:
+            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
+            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
         else:
-            fecha_fin = datetime.datetime(año, mes + 1, 1) - datetime.timedelta(seconds=1)
-    else:
-        fecha_inicio = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-        fecha_fin = datetime.datetime.strptime(fecha, '%Y-%m-%d')
-    sucursales = models.Codigo_oficina.objects.all()
-    cod_sucursales = {i.terminal: i.codigo for i in sucursales}
-    codigo_sucursal = cod_sucursales[sucursal] 
-    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin), codigo_incocredito=codigo_sucursal)
-    transacciones_data = []
-    total_datos = 0
-    for t in transacciones:
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': t.valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
-            total_datos = total_datos + t.valor
-    return Response({'total': f"${total_datos:,.2f}", 'sucursal': sucursal})
+            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
+            fecha_fin_naive = fecha_inicio_naive
+
+        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+        fecha_fin = timezone.make_aware(fecha_fin_naive)
+        
+        transacciones_qs = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin), 
+            codigo_incocredito=codigo_sucursal
+        )
+        
+        total_datos = transacciones_qs.aggregate(total=Sum('valor'))['total'] or 0
+
+        return Response({'total': total_datos, 'sucursal': sucursal_terminal})
+
+    except User.DoesNotExist:
+        return Response({'error': 'Usuario del token no es válido.'}, status=401)
+    except Exception as e:
+        print(f"Error en select_datos_corresponsal_cajero: {str(e)}")
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+
 
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
+    action = request.data.get('action', 'analyze') 
     cabecera = request.data['cabecera']
     items = request.data['items']
-    df =pd.DataFrame(items, columns=cabecera)
-    df.fillna("", inplace=True)
-    df['valor'] = df['valor'].replace("", "0").astype(int)
-    df['nura'] = df['nura'].replace("", "0").astype(int)
-    df['comision'] = df['comision'].replace("", "0").astype(int)
-    # df['fecha'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y')
-    fecha_min = df['fecha'].min()
-    fecha_max = df['fecha'].max()
-    try:
-        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%d/%m/%Y'))
-        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%d/%m/%Y'))
-    except:
-        fecha_minima = timezone.make_aware(datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ'))
-        fecha_maxima = timezone.make_aware(datetime.datetime.strptime(fecha_max, '%Y-%m-%dT%H:%M:%S.%fZ'))
-    try:
-        transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_minima, fecha_maxima))
-        transacciones_data = []
-        for t in transacciones:
-            valor = t.valor if t.operacion != 'Retiro' else - t.valor
-            if t.operacion == 'Retiro':
-                pass
-            transacciones_data.append({
-                'establecimiento': t.establecimiento,
-                'codigo_aval': t.codigo_aval,
-                'codigo_incocredito': t.codigo_incocredito,
-                'terminal': t.terminal,
-                'fecha': t.fecha.strftime('%d/%m/%Y'),
-                'hora': t.hora,
-                'nombre_convenio': t.nombre_convenio,
-                'operacion': t.operacion,
-                'fact_cta': t.fact_cta,
-                'cod_aut': t.cod_aut,
-                'valor': valor,
-                'nura': t.nura,
-                'esquema': t.esquema,
-                'numero_tarjeta': t.numero_tarjeta,
-                'comision': t.comision,
-            })
 
-        rows_to_drop = []
-        for index, row in df.iterrows():
-            row_dict = row.to_dict()
-            if row_dict in transacciones_data:
-                # print('esta es igual ')
-                rows_to_drop.append(index)
-        df.drop(rows_to_drop, inplace=True)
-    except:
-        pass
-    transacciones = []
-    for index, row in df.iterrows():
-        try:
-            try:
-                time_date = datetime.datetime.strptime(fecha_min, '%Y-%m-%dT%H:%M:%S.%fZ')
-            except:
-                time_date = datetime.datetime.strptime(row.fecha, "%d/%m/%Y").date()
-            establecimiento = row.establecimiento
-            codigo_aval = row.codigo_aval
-            codigo_incocredito = row.codigo_incocredito
-            terminal = row.terminal
-            fecha = time_date
-            hora = row.hora
-            nombre_convenio = row.nombre_convenio
-            operacion = row.operacion
-            fact_cta = row.fact_cta
-            cod_aut = row.cod_aut
-            valor = row.valor if row.operacion != 'Retiro' else - row.valor
-            nura = row.nura
-            esquema = row.esquema
-            numero_tarjeta = row.numero_tarjeta
-            comision = row.comision
-            transacciones.append(models.Transacciones_sucursal(
-                establecimiento=establecimiento,
-                codigo_aval=codigo_aval,
-                codigo_incocredito=codigo_incocredito,
-                terminal=terminal,
-                fecha=fecha,
-                hora=hora,
-                nombre_convenio=nombre_convenio,
-                operacion=operacion,
-                fact_cta=fact_cta,
-                cod_aut=cod_aut,
-                valor=valor,
-                nura=nura,
-                esquema=esquema,
-                numero_tarjeta=numero_tarjeta,
-                comision=comision,
-            ))
-        except Exception as e:
-            texto = str(e).replace("'Series' object has no attribute ","Datos no tienen columna ")
-            raise AuthenticationFailed(texto)
+    df = pd.DataFrame(items, columns=cabecera)
+    df.fillna("", inplace=True)
+
+    if action == 'analyze':
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.strip()
         
-    models.Transacciones_sucursal.objects.bulk_create(transacciones)
-   
-    return Response({'mensaje':'Guardado con exito'})
+        numeric_cols = ['valor', 'nura', 'comision']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        df['fecha_obj'] = pd.to_datetime(df['fecha'], dayfirst=True, errors='coerce').dt.date
+        df.dropna(subset=['fecha_obj'], inplace=True) 
+        
+        if df.empty:
+            return Response({'duplicados': [], 'items_filtrados': [], 'cabecera': cabecera})
+
+        fecha_minima = df['fecha_obj'].min()
+        fecha_maxima = df['fecha_obj'].max()
+
+        registros_existentes = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_minima, fecha_maxima)
+        ).values_list('establecimiento', 'terminal', 'fecha', 'cod_aut')
+        
+        existentes_set = set(
+            (str(r[0]).strip(), str(r[1]).strip(), r[2], str(r[3]).strip()) 
+            for r in registros_existentes
+        )
+
+        items_filtrados = []
+        duplicados_info = []
+        filas_vistas = set()
+
+        for index, row in df.iterrows():
+            fila_completa = list(row.drop('fecha_obj'))
+            fecha_dt = row['fecha_obj']
+            if pd.isna(fecha_dt):
+                continue
+            
+            tupla_identificadora = (
+                str(row.get('establecimiento', '')).strip(),
+                str(row.get('terminal', '')).strip(),
+                fecha_dt,
+                str(row.get('cod_aut', '')).strip()
+            )
+
+            duplicado_encontrado = False
+            if tupla_identificadora in filas_vistas:
+                duplicados_info.append({'linea': index + 2, 'razon': 'Duplicado en archivo', 'datos': fila_completa})
+                duplicado_encontrado = True
+            
+            if not duplicado_encontrado and tupla_identificadora in existentes_set:
+                duplicados_info.append({'linea': index + 2, 'razon': 'Ya existe en BD', 'datos': fila_completa})
+                duplicado_encontrado = True
+            
+            if duplicado_encontrado:
+                continue
+
+            filas_vistas.add(tupla_identificadora)
+            items_filtrados.append(fila_completa)
+
+        return Response({
+            'duplicados': duplicados_info,
+            'items_filtrados': items_filtrados,
+            'cabecera': cabecera
+        })
+
+    elif action == 'save':
+        transacciones_para_crear = []
+        for item_row in items:
+            row_dict = dict(zip(cabecera, item_row))
+
+            try:
+                valor = int(float(row_dict.get('valor', 0)))
+                nura = int(float(row_dict.get('nura', 0)))
+                comision = int(float(row_dict.get('comision', 0)))
+                fecha_str = row_dict.get('fecha', '')
+                fecha_dt = datetime.datetime.strptime(fecha_str, "%d/%m/%Y").date()
+            except (ValueError, TypeError):
+                continue
+            
+            transacciones_para_crear.append(
+                models.Transacciones_sucursal(
+                    establecimiento=row_dict.get('establecimiento', ''),
+                    codigo_aval=row_dict.get('codigo_aval', ''),
+                    codigo_incocredito=row_dict.get('codigo_incocredito', ''),
+                    terminal=row_dict.get('terminal', ''),
+                    fecha=fecha_dt,
+                    hora=row_dict.get('hora', '00:00:00'),
+                    nombre_convenio=row_dict.get('nombre_convenio', ''),
+                    operacion=row_dict.get('operacion', ''),
+                    fact_cta=row_dict.get('fact_cta', ''),
+                    cod_aut=row_dict.get('cod_aut', ''),
+                    valor= -valor if row_dict.get('operacion') == 'Retiro' else valor,
+                    nura=nura,
+                    esquema=row_dict.get('esquema', ''),
+                    numero_tarjeta=row_dict.get('numero_tarjeta', ''),
+                    comision=comision,
+                )
+            )
+        
+        if transacciones_para_crear:
+            models.Transacciones_sucursal.objects.bulk_create(transacciones_para_crear, ignore_conflicts=True)
+            
+        return Response({'mensaje': f'{len(transacciones_para_crear)} registros procesados.'}, status=200)
+    
+    return Response({'error': 'Acción no especificada o inválida.'}, status=400)
+
 
 @api_view(['POST'])
 def calcular_comisiones(request):
@@ -1523,72 +1959,52 @@ def user_validate(request):
             raise AuthenticationFailed('Debes estar logueado')
         return Response({"cambioClave": False})
 
-@api_view(['POST'])
+@api_view(['GET'])
 def user_permissions(request):
-    if request.method == 'POST':
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
-        if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            if payload['change']:
-                return Response({"cambioClave": True})
-            usuario = User.objects.get(username=payload['id'])
-            permisos_ind = models.Permisos_usuarios.objects.filter(
-                user= usuario
-            )
-            
-            # new_permiso = models.Permisos.objects.create(
-            #     permiso ='informes',
-            #     active=True
-            # )
-            # new_permiso.save()
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return Response({'detail': 'Token no proporcionado.'}, status=401)
 
-            permisos = {
-                'superadmin' : usuario.is_superuser,
-                'administrador' : {
-                    'main': False,
-                },
-                'informes':{
-                    'main':False,
-                },
-                'control_interno' : {
-                    'main': False,
-                },
-                'gestion_humana' : {
-                    'main': False,
-                },
-                'contabilidad' : {
-                    'main': False,
-                },
-                'comisiones' : {
-                    'main': False,
-                },
-                'soporte' : {
-                    'main': False,
-                },
-                'auditoria' : {
-                    'main': False,
-                },
-                'comercial' : {
-                    'main': False,
-                },
-                'corresponsal' : {
-                    'main': False,
-                },
-                'caja' : {
-                    'main': False,
-                },
-            }
-            for i in permisos_ind:
-                permisos[i.permiso.permiso]['main'] = i.tiene_permiso
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"permisos":permisos, "cambioClave": False})
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload['id'])
+
+        if getattr(usuario, 'force_password_change', False):
+            return Response({"cambioClave": True})
+
+        permisos_dict = {
+            'superadmin': usuario.is_superuser,
+            'administrador': {'main': False}, 'informes': {'main': False},
+            'control_interno': {'main': False}, 'gestion_humana': {'main': False},
+            'contabilidad': {'main': False}, 'comisiones': {'main': False},
+            'soporte': {'main': False}, 'auditoria': {'main': False},
+            'comercial': {'main': False}, 'corresponsal': {'main': False},
+            'caja': {'main': False},
+        }
+
+        permisos_usuario = models.Permisos_usuarios.objects.filter(user=usuario).select_related('permiso')
+
+        for p_usuario in permisos_usuario:
+            permiso_name = p_usuario.permiso.permiso.lower()
+            if permiso_name in permisos_dict:
+                if permiso_name == 'superadmin':
+                    permisos_dict[permiso_name] = p_usuario.tiene_permiso
+                else:
+                    permisos_dict[permiso_name]['main'] = p_usuario.tiene_permiso
+        
+        return Response({
+            "permisos": permisos_dict,
+            "usuario": usuario.username,
+            "cambioClave": False
+        })
+
+    except jwt.ExpiredSignatureError:
+        return Response({'detail': 'Token ha expirado.'}, status=401)
+    except User.DoesNotExist:
+        return Response({'detail': 'Usuario del token no es válido.'}, status=401)
+    except Exception as e:
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
 
 @api_view(['POST'])
 def cambio_clave(request):
@@ -1613,87 +2029,102 @@ def cambio_clave(request):
         else:
             raise AuthenticationFailed('Las contraseñas deben ser iguales')
 
-@api_view(['POST'])
-def permissions(request):
-    if request.method == 'POST':
-        # new_permiso = models.Permisos.objects.create(
-        #         permiso ='informes',
-        #         active=True
-        #     )
-        # new_permiso.save()
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
-        if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            usuario = User.objects.get(username=payload['id'])
-            if usuario.is_superuser == False:
-                raise AuthenticationFailed('Debes ser superuser')
-            usuarios = list(User.objects.all())
-            data = []
-            for i in usuarios:
-                administrador = models.Permisos_usuarios.objects.filter(user=i.id, permiso=1)
-                control_interno = models.Permisos_usuarios.objects.filter(user=i.id, permiso=2)
-                gestion_humana = models.Permisos_usuarios.objects.filter(user=i.id, permiso=3)
-                contabilidad = models.Permisos_usuarios.objects.filter(user=i.id, permiso=4)
-                comisiones = models.Permisos_usuarios.objects.filter(user=i.id, permiso=5)
-                soporte = models.Permisos_usuarios.objects.filter(user=i.id, permiso=6)
-                auditoria = models.Permisos_usuarios.objects.filter(user=i.id, permiso=7)
-                comercial = models.Permisos_usuarios.objects.filter(user=i.id, permiso=8)
-                informes= models.Permisos_usuarios.objects.filter(user=i.id, permiso=9)
-                corresponsal= models.Permisos_usuarios.objects.filter(user=i.id, permiso=10)
-                data.append({
-                    'usuario': i.username,
-                    'administrador': administrador[0].tiene_permiso if len(administrador)>0 else False,
-                    'informes': informes[0].tiene_permiso if len(informes) >0 else False,
-                    'control_interno': control_interno[0].tiene_permiso if len(control_interno)>0 else False,
-                    'gestion_humana': gestion_humana[0].tiene_permiso if len(gestion_humana)>0 else False,
-                    'contabilidad': contabilidad[0].tiene_permiso if len(contabilidad)>0 else False,
-                    'comisiones': comisiones[0].tiene_permiso if len(comisiones)>0 else False,
-                    'soporte': soporte[0].tiene_permiso if len(soporte)>0 else False,
-                    'auditoria': auditoria[0].tiene_permiso if len(auditoria)>0 else False,
-                    'comercial': comercial[0].tiene_permiso if len(comercial)>0 else False,
-                    'corresponsal': comercial[0].tiene_permiso if len(corresponsal)>0 else False,
-                    })
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"usuarios": data})
-    
+@api_view(['GET'])
+def permissions_matrix(request):
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
+        
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        
+        solicitante = User.objects.get(username=payload['id'])
+        if not solicitante.is_superuser:
+            raise AuthenticationFailed('Solo los superusuarios pueden ver los permisos.')
+
+        todos_los_permisos = list(models.Permisos.objects.all())
+        todos_los_usuarios = list(User.objects.all())
+        permisos_asignados = models.Permisos_usuarios.objects.filter(tiene_permiso=True).values('user_id', 'permiso__permiso')
+
+        roles_disponibles = [
+            {"name": p.permiso, "label": p.permiso.replace('_', ' ').capitalize()}
+            for p in todos_los_permisos
+        ]
+        
+        permisos_por_usuario = {}
+        for p_asignado in permisos_asignados:
+            user_id = p_asignado['user_id']
+            permiso_name = p_asignado['permiso__permiso']
+            if user_id not in permisos_por_usuario:
+                permisos_por_usuario[user_id] = set()
+            permisos_por_usuario[user_id].add(permiso_name)
+
+        usuarios_con_permisos = []
+        for usuario in todos_los_usuarios:
+            roles = {rol['name']: usuario.id in permisos_por_usuario and rol['name'] in permisos_por_usuario[usuario.id] 
+                     for rol in roles_disponibles}
+            usuarios_con_permisos.append({
+                'user_id': usuario.id,
+                'username': usuario.username,
+                'roles': roles
+            })
+        
+        return Response({
+            "roles": roles_disponibles,
+            "users_permissions": usuarios_con_permisos
+        })
+
+    except (AuthenticationFailed, User.DoesNotExist, jwt.ExpiredSignatureError, jwt.DecodeError) as e:
+        return Response({'detail': str(e)}, status=401)
+    except Exception as e:
+        return Response({'detail': f'Error inesperado: {str(e)}'}, status=500)
+
+
 @api_view(['POST'])
 def permissions_edit(request):
-    if request.method == 'POST':
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
-        if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            usuario = User.objects.get(username=payload['id'])
-            if usuario.is_superuser == False:
-                raise AuthenticationFailed('Debes ser superuser')
-            for i in request.data['data']:
-                user = User.objects.get(username=i['usuario'])
-                for key, value in i.items():
-                    if key != 'usuario':
-                        perm = models.Permisos.objects.get(permiso=key)
-                        permiso, created = models.Permisos_usuarios.objects.get_or_create(
-                            user = user,
-                            permiso = perm,
-                            defaults={'tiene_permiso': value}
-                        )
-                        if not created:
-                            permiso.tiene_permiso = value
-                            permiso.save()
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"message": 'guardado con exito'})
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
+        
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        solicitante = User.objects.get(username=payload['id'])
+        if not solicitante.is_superuser:
+            raise AuthenticationFailed('Solo los superusuarios pueden editar permisos.')
+
+        with transaction.atomic():
+            data_a_guardar = request.data.get('data', [])
+            
+            user_ids = [item['user_id'] for item in data_a_guardar]
+            models.Permisos_usuarios.objects.filter(user_id__in=user_ids).delete()
+
+            permisos_a_crear = []
+            todos_los_permisos_map = {p.permiso: p for p in models.Permisos.objects.all()}
+            
+            for item_usuario in data_a_guardar:
+                user_id = item_usuario['user_id']
+                for permiso_name, tiene_permiso in item_usuario['roles'].items():
+                    if tiene_permiso:
+                        permiso_obj = todos_los_permisos_map.get(permiso_name)
+                        if permiso_obj:
+                            permisos_a_crear.append(
+                                models.Permisos_usuarios(
+                                    user_id=user_id,
+                                    permiso=permiso_obj,
+                                    tiene_permiso=True
+                                )
+                            )
+            
+            models.Permisos_usuarios.objects.bulk_create(permisos_a_crear)
+
+        return Response({"detail": "Permisos guardados con éxito"})
+
+    except (AuthenticationFailed, User.DoesNotExist, jwt.ExpiredSignatureError, jwt.DecodeError) as e:
+        return Response({'detail': str(e)}, status=401)
+    except Exception as e:
+        return Response({'detail': f'Error inesperado al guardar: {str(e)}'}, status=500)
     
 @api_view(['GET', 'POST'])
 def translate_products_prepago(request):
@@ -1883,162 +2314,171 @@ def translate_prepago(requests):
                 data.append(temp_data)
             # print(cabecera)
         return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
-@api_view(['PUT', 'POST'])
-def lista_productos_prepago_equipo(requests):
-    if requests.method == 'POST':
-        precio = requests.data['precio']
-        equipo = requests.data['equipo']
-        print(precio, equipo)
-        new_data = []
-        data = models.Lista_precio.objects.all()
-        df = pd.DataFrame(list(data.values()))
-        df['dia'] = pd.to_datetime(df['dia'])
-        df['valor'] = df['valor'].astype(float)
 
-        df_resultado = df[(df['producto'] == equipo) & (df['nombre'] == precio)]
-       
+from rest_framework.views import APIView
 
-        for index, row in df_resultado.iterrows():
-           
-            tem_data = {
-                'equipo': row['producto'],
-                'valor sin iva': '${:,.2f}'.format(row['valor']),
-                'fecha': row['dia'],
-    
+class ListaProductosPrepagoEquipo(APIView):
+    def post(self, request, format=None):
+        try:
+            precio = request.data['precio']
+            equipo = request.data['equipo']
+            qs = models.Lista_precio.objects.filter(producto=equipo, nombre=precio).order_by('-dia')
+            if not qs.exists():
+                return Response({'data': []})
+            
+            df = pd.DataFrame(list(qs.values()))
+            df.rename(columns={'valor': 'valor_actual'}, inplace=True)
+            df['valor_anterior'] = df['valor_actual'].shift(-1)
+            df.fillna({'valor_anterior': 0}, inplace=True)
+            df['variation'] = df.apply(calcular_variacion, axis=1)
+
+            sim = Decimal('2000')
+            base = Decimal('1095578')
+            new_data = []
+
+            for _, row in df.iterrows():
+                variacion_data = row.get('variation')
+                valor_actual = Decimal(row.get('valor_actual', 0))
+                iva = valor_actual * Decimal('0.19') if valor_actual >= base else Decimal('0')
+
+                tem_data = {
+                    'equipo': row.get('producto'),
+                    'fecha': row.get('dia'),
+                    'equipo sin IVA': float(valor_actual),
+                    'valor_anterior': float(row.get('valor_anterior', 0)),
+                    'precio simcard': float(sim),
+                    'IVA simcard': float(sim * Decimal('0.19')),
+                    'IVA equipo': float(iva),
+                    'total': float(sim * Decimal('1.19') + valor_actual + iva),
+                    'indicador': variacion_data.get('indicador'),
+                    'diferencial': variacion_data.get('diferencial'),
+                    'porcentaje': variacion_data.get('porcentaje'),
+                }
+                new_data.append(tem_data)
+            
+            return Response({'data': new_data})
+        except Exception as e:
+            print(f"ERROR en /lista-productos-prepago-equipo: {str(e)}")
+            return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+
+def calcular_variacion(row):
+    valor_anterior_raw = row.get('valor_anterior')
+
+    if pd.isna(valor_anterior_raw):
+        return {'indicador': 'neutral', 'diferencial': 0, 'porcentaje': 0}
+
+    valor_actual = float(row.get('valor_actual', 0))
+    valor_anterior = float(valor_anterior_raw)
+
+    if valor_actual == valor_anterior:
+        return {'indicador': 'neutral', 'diferencial': 0, 'porcentaje': 0}
+
+    elif valor_actual > valor_anterior:
+        dif = valor_actual - valor_anterior
+        percentage = (dif / valor_anterior) * 100 if valor_anterior > 0 else 100.0
+        return {'indicador': 'up', 'diferencial': dif, 'porcentaje': round(percentage, 2)}
+
+    elif valor_actual < valor_anterior:
+        dif = valor_anterior - valor_actual
+        percentage = (dif / valor_anterior) * 100 if valor_anterior > 0 else 0
+        return {'indicador': 'down', 'diferencial': dif, 'porcentaje': round(percentage, 2)}
+# views.py 
+
+# En tu archivo views.py
+@api_view(['GET', 'POST'])
+def lista_productos_prepago(request):
+    if request.method == 'GET':
+        # La parte GET no necesita cambios, se mantiene como está
+        try:
+            auth_header = request.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Bearer '):
+                return Response({'detail': 'Token no proporcionado.'}, status=401)
+            token = auth_header.split(' ')[1]
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            usuario = User.objects.get(username=payload.get('id'))
+            permisos_por_usuario = {
+                '33333': ['Precio publico', 'Precio Fintech', 'Precio Addi'],
+                '44444': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio premium', 'Precio Addi'],
+                '11111': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio Addi'],
+                '22222': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio Addi', 'Precio Adelantos Valle']
             }
-            new_data.append(tem_data)
-        
-        print(new_data)
-
-        return Response({'data' : new_data})
-
-
-@api_view(['PUT', 'POST'])
-def lista_productos_prepago(requests):
-    if requests.method == 'PUT':
-        traduccion = {
-            'Precio publico':'Precio Publico',
-            'Precio sub':'Subdistribuidor',
-            'Precio premium':'Premium',
-            'Precio Fintech':'Fintech Zonificacion Subdistribuidores Y Externos',
-            'Precio Addi':'Addi',
-            'Precio Flamingo':'Flamingo',
-            'Precio Adelantos Valle':'Precio Adelantos Valle',
-            'Costo':'Costo',
-        }
-        lista_precios = []
-        token = requests.data['jwt']
-        payload = jwt.decode(token, 'secret', algorithms='HS256')
-        usuario = User.objects.get(username=payload['id'])
-        listas = models.Permisos_usuarios_precio.objects.filter(user= usuario.id)
-        for i in listas:
-            permiso = i.permiso.permiso
-            print(permiso)
-            lista_precios.append({'id':permiso, 'nombre':traduccion[permiso]})
-        
-
-        return Response({'data' : lista_precios})
-    
-    if requests.method == 'POST':   
-        new_data = []
-        productos = []
-        precio = requests.data['precio']
-        
-
-        data = models.Lista_precio.objects.all()
-        df = pd.DataFrame(list(data.values()))
-        df['dia'] = pd.to_datetime(df['dia'])
-        df['valor'] = df['valor'].astype(float)
-
-        df_descuentos = df[df['nombre'] == 'descuento']
-        df_descuentos = df_descuentos.sort_values('dia', ascending=False).drop_duplicates(subset=['nombre', 'producto']).reset_index(drop=True)
-        df_descuentos = df_descuentos.rename(columns={'valor': 'descuento'})
-
-        df_filtrado = df[df['nombre'] == precio]
-        
-        df_resultado = df_filtrado.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        
-        df_resultado = pd.merge(df_resultado, df_descuentos[['producto', 'descuento']], on='producto', how='left')
-
-        df_kit_addi = df[df['nombre'] == 'Kit Addi']
-        df_kit_addi = df_kit_addi.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_addi = df_kit_addi.rename(columns={'valor': 'kit addi'})
-        df_resultado = pd.merge(df_resultado, df_kit_addi[['producto', 'kit addi']], on='producto', how='left')
-
-        df_kit_fintech = df[df['nombre'] == 'Kit Fintech']
-        df_kit_fintech = df_kit_fintech.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_fintech = df_kit_fintech.rename(columns={'valor': 'kit fintech'})
-        df_resultado = pd.merge(df_resultado, df_kit_fintech[['producto', 'kit fintech']], on='producto', how='left')
-        
-        
-        df_kit_valle = df[df['nombre'] == 'Kit Valle']
-        df_kit_valle = df_kit_valle.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_valle = df_kit_valle.rename(columns={'valor': 'kit valle'})
-        df_resultado = pd.merge(df_resultado, df_kit_valle[['producto', 'kit valle']], on='producto', how='left')
-
-
-        df_kit_sub = df[df['nombre'] == 'Kit Sub']
-        df_kit_sub = df_kit_sub.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_kit_sub = df_kit_sub.rename(columns={'valor': 'kit sub'})
-        df_resultado = pd.merge(df_resultado, df_kit_sub[['producto', 'kit sub']], on='producto', how='left')
-
-        df_costo = df[df['nombre'] == 'Costo']
-        df_costo = df_costo.sort_values('dia', ascending=False).drop_duplicates('producto').reset_index(drop=True)
-        df_costo = df_costo.rename(columns={'valor': 'costo'})
-        df_resultado = pd.merge(df_resultado, df_costo[['producto', 'costo']], on='producto', how='left')
-        
-
-
-        sim = 2000
-        base = 1095578
-
-        for index, row in df_resultado.iterrows():
-            if precio == 'Costo':
-                tem_data = {
-                    'equipo': row['producto'],
-                    'costo': '${:,.2f}'.format(row['costo']),
-                    'descuento': '${:,.2f}'.format(row['descuento']),
-                    'total': '${:,.2f}'.format(row['costo'] - row['descuento']),
-                }
-                new_data.append(tem_data)
+            todas_las_listas = [
+                {"id": "Precio publico", "nombre": "Precio Público"}, {"id": "Precio sub", "nombre": "Subdistribuidor"},
+                {"id": "Precio premium", "nombre": "Premium"}, {"id": "Precio Fintech", "nombre": "Fintech"},
+                {"id": "Precio Addi", "nombre": "Addi"}, {"id": "Precio Flamingo", "nombre": "Flamingo"},
+                {"id": "Costo", "nombre": "Costo"}, {"id": "Precio Adelantos Valle", "nombre": "Adelantos Valle"},
+                {"id": "Descuento Kit", "nombre": "Descuento Kit"}
+            ]
+            if usuario.username in permisos_por_usuario:
+                listas_permitidas = permisos_por_usuario[usuario.username]
+                lista_precios_final = [lista for lista in todas_las_listas if lista['id'] in listas_permitidas]
             else:
-                valor = row['valor']
-                iva = row['valor'] * 0.19 if row['valor'] >= base else 0
-                total = sim * 1.19 + valor + iva
-                tem_data = {
-                    'equipo': row['producto'],
-                    'precio simcard': '${:,.2f}'.format(sim),
-                    'IVA simcard': '${:,.2f}'.format(sim * 0.19),
-                    'equipo sin IVA': '${:,.2f}'.format(valor),
-                    'IVA equipo': '${:,.2f}'.format(iva),
-                }
-                if precio == 'Precio sub':
-                    kit = row['kit sub']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Fintech':
-                    kit = row['kit fintech']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Addi':
-                    kit = row['kit addi']
-                    tem_data['KIT'] = kit
-                    total = total + kit
-                elif precio == 'Precio Adelantos Valle':
-                    kit = row['kit valle']
-                    tem_data['KIT'] = kit
-                    total = total + kit
+                lista_precios_final = todas_las_listas
+            return Response({'data': lista_precios_final})
+        except Exception as e:
+            return Response({'detail': f'Error en GET: {str(e)}'}, status=500)
+
+    elif request.method == 'POST':
+        try:
+            precio_nombre = request.data.get('precio')
+            if not precio_nombre:
+                return Response({'error': 'El campo "precio" es obligatorio'}, status=400)
+
+            todos_los_precios = models.Lista_precio.objects.filter(nombre=precio_nombre).order_by('producto', '-dia')
+            df = pd.DataFrame(list(todos_los_precios.values()))
+
+            if df.empty:
+                return Response({'data': [], 'fecha_actual': 'N/A'})
+
+            df['valor_anterior'] = df.groupby('producto')['valor'].shift(-1)
+            df.fillna({'valor_anterior': 0}, inplace=True)
+            
+            df_final = df.drop_duplicates('producto', keep='first').copy()
+            df_final.rename(columns={'valor': 'valor_actual'}, inplace=True)
+
+            df_descuentos = pd.DataFrame(list(models.Lista_precio.objects.filter(nombre='descuento').order_by('producto', '-dia').values()))
+            if not df_descuentos.empty:
+                df_descuentos = df_descuentos.drop_duplicates('producto', keep='first')[['producto', 'valor']].rename(columns={'valor': 'descuento'})
+                df_final = pd.merge(df_final, df_descuentos, on='producto', how='left')
+            df_final.fillna({'descuento': 0}, inplace=True)
+            
+            df_final['variation'] = df_final.apply(calcular_variacion, axis=1)
+
+            sim = Decimal('2000')
+            base = Decimal('1095578')
+            new_data = []
+
+            for _, row in df_final.iterrows():
+                variacion_data = row.get('variation')
+                valor_actual = Decimal(row.get('valor_actual', 0))
+                iva = valor_actual * Decimal('0.19') if valor_actual >= base else Decimal('0')
                 
-                tem_data['total'] = '${:,.2f}'.format(total)
-                if precio == 'Precio publico':
-                    tem_data['Promo'] = 'PROMO' if row['descuento'] >0 else 'NO'
+                tem_data = {
+                    'equipo': row.get('producto'),
+                    'precio simcard': float(sim),
+                    'IVA simcard': float(sim * Decimal('0.19')),
+                    'equipo sin IVA': float(valor_actual),
+                    'IVA equipo': float(iva),
+                    'total': float(sim * Decimal('1.19') + valor_actual + iva),
+                    'valor_anterior': float(row.get('valor_anterior', 0)),
+                    'indicador': variacion_data.get('indicador'),
+                    'diferencial': variacion_data.get('diferencial'),
+                    'porcentaje': variacion_data.get('porcentaje'),
+                }
+                if precio_nombre == 'Precio publico' and row.get('descuento', 0) > 0:
+                    tem_data['Promo'] = 'PROMO'
+                
                 new_data.append(tem_data)
+            
+            fecha_carga = df_final['dia'].max()
+            fecha_formateada = fecha_carga.strftime('%d de %B de %Y') if fecha_carga else "N/A"
+            
+            return Response({'data': new_data, 'fecha_actual': fecha_formateada})
 
-        position = {1:'up', 2: 'down', 3: 'neutral'}
-        new_data = [{**data, "variation": position[random.randint(1, 3)]} for data in new_data]
-
-        return Response({'data' : new_data})
-
+        except Exception as e:
+            traceback.print_exc()
+            return Response({'error': f'Error interno: {str(e)}'}, status=500)
+        
 class UpdatePrices:
 
     def __init__(
@@ -2403,3 +2843,24 @@ def generate_unique_filename(filename):
             # Combinar para crear un nombre único
             unique_filename = f"{current_time}_{random_string}.{file_extension}"
             return unique_filename
+        
+@api_view(['GET'])
+def obtener_imagen_login(request):
+    try:
+        imagen = ImagenLogin.objects.latest('fecha')
+        serializer = ImagenLoginSerializer(imagen)
+        return Response(serializer.data)
+    except ImagenLogin.DoesNotExist:
+        return Response({'url': '/img-example.jpg'}, status=200)
+
+@api_view(['POST'])
+def actualizar_imagen_login(request):
+    url = request.data.get('url')
+    if not url:
+        return Response({'error': 'URL requerida'}, status=400)
+    
+    # Puedes eliminar las anteriores si solo quieres una
+    ImagenLogin.objects.all().delete()
+    
+    imagen = ImagenLogin.objects.create(url=url)
+    return Response({'mensaje': 'Imagen actualizada'})  

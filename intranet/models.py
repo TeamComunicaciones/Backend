@@ -122,9 +122,67 @@ class Corresponsal_consignacion(models.Model):
     url = models.URLField(blank=True, null=True)
     codigo_incocredito = models.CharField(max_length=100, null=True)
     detalle_banco = models.CharField(max_length=100, null=True)
+    min = models.CharField(max_length=20, blank=True, null=True)
+    imei = models.CharField(max_length=30, blank=True, null=True)
+    planilla = models.CharField(max_length=50, blank=True, null=True)
 
 class Lista_negra(models.Model):
     equipo = models.CharField(max_length=255, unique=True)
     def __str__(self) -> str:
         return self.equipo
+    
+from django.db import models
+from django.contrib.auth.models import User
 
+class Proyecto(models.Model):
+    nombre = models.CharField(max_length=255)
+    area = models.CharField(max_length=255)
+    detalle = models.TextField()
+
+    def __str__(self):
+        return self.nombre
+
+class ActaEntrega(models.Model):
+    ESTADO_CHOICES = [
+        ('Pendiente', 'Pendiente'),
+        ('Aprobado', 'Aprobado'),
+        ('Rechazado', 'Rechazado'),
+    ]
+    proyecto = models.ForeignKey(Proyecto, on_delete=models.CASCADE)
+    fecha_entrega = models.DateField()
+    version_software = models.CharField(max_length=50)
+    responsable = models.CharField(max_length=100)
+    estado = models.CharField(max_length=10, choices=ESTADO_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Acta #{self.id} - {self.proyecto.nombre}"
+
+class ActaObjetivos(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    descripcion = models.TextField()
+
+class ActaObservaciones(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    descripcion = models.TextField()
+
+class ActaRecibidoPor(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    cargo = models.CharField(max_length=100, null=True, blank=True)
+
+
+class ActaArchivos(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    nombre_archivo = models.CharField(max_length=255)
+    ruta_archivo = models.CharField(max_length=500)
+
+
+class ActaArchivos(models.Model):
+    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
+    nombre_archivo = models.CharField(max_length=255)
+    ruta_archivo = models.CharField(max_length=500)
+    
+class ImagenLogin(models.Model):
+    url = models.URLField()
+    fecha = models.DateTimeField(auto_now=True) 
