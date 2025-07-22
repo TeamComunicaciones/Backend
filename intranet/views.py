@@ -1,53 +1,52 @@
-from rest_framework.decorators import api_view, permission_classes, schema
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.exceptions import AuthenticationFailed
-from rest_framework.pagination import PageNumberPagination
-from django.shortcuts import get_object_or_404
-from django.db.models import Prefetch
-from django.core.files.storage import default_storage
-from django.core.files.base import ContentFile
-from django.http import JsonResponse, HttpResponse
+# 1. Librerías Estándar de Python
+import ast
+import base64
+import datetime
+import io
+import json
+import locale
+import os
+import random
+import shutil
+import string
+import traceback
+import uuid
+from datetime import date
+from decimal import Decimal
+
+# 2. Librerías de Terceros
+import jwt
+import numpy as np
+import pandas as pd
+import requests
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
+from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
-from rest_framework.decorators import api_view
+from django.core.exceptions import ObjectDoesNotExist
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Prefetch, Q, Sum
+from django.db.models.functions import TruncDay
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
-from django.core.exceptions import ObjectDoesNotExist
-from sqlControl.sqlControl import Sql_conexion
-from jwt.exceptions import ExpiredSignatureError, InvalidTokenError, DecodeError
-from django.db import IntegrityError
+from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
-import jwt, datetime
-from django.db.models import Count
-import json
-import pandas as pd
-import numpy as np
-from decimal import Decimal
-import random
-import requests
-import os
-import shutil
-import uuid
-import ast
-from datetime import date
-import string
-import base64
-from drf_yasg.utils import swagger_auto_schema
-from drf_yasg import openapi
-from .models import ActaEntrega
-from .serializers import ActaEntregaSerializer
-from . import models
-from django.contrib.auth import authenticate
+from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidTokenError
+from rest_framework.decorators import api_view, permission_classes, schema
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.pagination import PageNumberPagination
-import io
-from .models import ImagenLogin
-from .serializers import ImagenLoginSerializer
-from django.db import transaction
-from django.db.models import Sum
-import traceback
-from django.db.models.functions import TruncDay
-from django.db.models import Q
-from decimal import Decimal
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+# 3. Imports de la Aplicación Local
+from sqlControl.sqlControl import Sql_conexion
+from . import models
+from .models import ActaEntrega, ImagenLogin
+from .serializers import ActaEntregaSerializer, ImagenLoginSerializer
+
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -345,6 +344,11 @@ def prices(request, id=None):
 @api_view(['GET'])
 def get_filtros_precios(request):
     try:
+        try:
+            locale.setlocale(locale.LC_TIME, 'es_CO.UTF-8')
+        except locale.Error:
+            locale.setlocale(locale.LC_TIME, 'es')
+
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return Response({'detail': 'Token no proporcionado.'}, status=401)
@@ -375,15 +379,29 @@ def get_filtros_precios(request):
 
         productos = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
         marcas = sorted(list(set([p.split(' ')[0].upper() for p in productos if p])))
-        fechas = models.Lista_precio.objects.dates('dia', 'day', order='DESC')
+        
+        nombre_real_del_campo_de_fecha = 'dia'
+
+        cargas = models.Lista_precio.objects.order_by(f'-{nombre_real_del_campo_de_fecha}').values_list(nombre_real_del_campo_de_fecha, flat=True).distinct()[:50]
+        
+        fechas_validas_formateadas = []
+        for fecha_carga in cargas:
+            if fecha_carga:
+                texto_fecha = fecha_carga.strftime("%d de %B de %Y - %H:%M")
+                fechas_validas_formateadas.append({
+                    "valor": fecha_carga.isoformat(),
+                    "texto": texto_fecha
+                })
         
         return Response({
             'listas_precios': lista_precios_final,
             'marcas': marcas,
-            'fechas_validas': fechas
+            'fechas_validas': fechas_validas_formateadas
         })
     except Exception as e:
         return Response({'detail': f'Error interno en get_filtros_precios: {str(e)}'}, status=500)
+
+
 
 @api_view(['POST'])
 def buscar_precios(request):
@@ -410,27 +428,25 @@ def buscar_precios(request):
             
         fecha_carga = None
         if fecha_especifica_str:
-            fecha_especifica = datetime.datetime.strptime(fecha_especifica_str, '%Y-%m-%d').date()
+            fecha_especifica = datetime.datetime.fromisoformat(fecha_especifica_str)
             fecha_carga = fecha_especifica
-            df['dia'] = pd.to_datetime(df['dia']).dt.date
             
-            # --- CORRECCIÓN 1 AQUÍ ---
             df_actual = df[df['dia'] <= fecha_especifica].drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
             
             ids_actuales = df_actual['id'].tolist()
             productos_actuales = df_actual['producto'].tolist()
             precios_anteriores = models.Lista_precio.objects.filter(producto__in=productos_actuales, dia__lt=fecha_especifica).exclude(id__in=ids_actuales).order_by('producto', '-dia')
             df_anterior = pd.DataFrame(list(precios_anteriores.values('producto', 'valor')))
+            
             if not df_anterior.empty:
                 df_anterior = df_anterior.drop_duplicates('producto', keep='first').rename(columns={'valor': 'valor_anterior'})
                 df_final = pd.merge(df_actual, df_anterior, on='producto', how='left')
             else:
-                df_final = df_actual; df_final['valor_anterior'] = 0
+                df_final = df_actual
+                df_final['valor_anterior'] = 0
         else:
-            fecha_carga = df['dia'].max().date()
+            fecha_carga = df['dia'].max() 
             df['valor_anterior'] = df.groupby(['producto', 'nombre'])['valor'].shift(-1)
-            
-            # --- CORRECCIÓN 2 AQUÍ ---
             df_final = df.drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
         
         df_final.fillna({'valor_anterior': 0}, inplace=True)
