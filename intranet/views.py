@@ -13,6 +13,8 @@ import traceback
 import uuid
 from datetime import date
 from decimal import Decimal
+from rest_framework import status
+
 
 # 2. Librerías de Terceros
 import jwt
@@ -628,17 +630,47 @@ def settle_invoice(request):
 
 @api_view(['POST'])
 def assign_responsible(request):
-    responsable = request.data['encargado']
-    sucursal = request.data['sucursal']
-    responsable_id = models.User.objects.get(username=responsable.split('-')[0])
-    sucursal_id = models.Codigo_oficina.objects.get(terminal=sucursal)
+    encargado_data = request.data.get('encargado')
+    sucursal = request.data.get('sucursal')
+
+    if not encargado_data or not sucursal:
+        return Response(
+            {'error': 'Los campos "encargado" y "sucursal" son requeridos.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if isinstance(encargado_data, dict):
+        username_str = encargado_data.get('value')
+    else:
+        username_str = encargado_data
+
+    if not username_str:
+        return Response(
+            {'error': 'El dato del encargado no contiene un valor válido. Verifique que el objeto enviado tenga una llave "value".'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     try:
-        responsable_corresponsal = models.Responsable_corresponsal.objects.get(sucursal=sucursal_id)
-        responsable_corresponsal.user = responsable_id
-        responsable_corresponsal.save()
-    except ObjectDoesNotExist:
-        models.Responsable_corresponsal.objects.create(sucursal=sucursal_id, user=responsable_id)
-    return Response([])
+        username_to_find = username_str.split('-')[0]
+        responsable = models.User.objects.get(username=username_to_find)
+        sucursal_obj = models.Codigo_oficina.objects.get(terminal=sucursal)
+
+        obj, created = models.Responsable_corresponsal.objects.update_or_create(
+            sucursal=sucursal_obj,
+            defaults={'user': responsable}
+        )
+        return Response({'status': 'ok'}, status=status.HTTP_200_OK)
+
+    except models.User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario con username "{username_to_find}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    except models.Codigo_oficina.DoesNotExist:
+        return Response(
+            {'error': f'La sucursal con terminal "{sucursal}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
 
 @api_view(['POST'])
