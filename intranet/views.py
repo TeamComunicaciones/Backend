@@ -14,6 +14,8 @@ import uuid
 from datetime import date
 from decimal import Decimal
 from rest_framework import status
+from collections import defaultdict
+
 
 
 # 2. Librerías de Terceros
@@ -42,6 +44,11 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+
+import re
+import ast
+from django.db import transaction
+from decimal import Decimal, InvalidOperation
 
 # 3. Imports de la Aplicación Local
 from sqlControl.sqlControl import Sql_conexion
@@ -405,121 +412,205 @@ def get_filtros_precios(request):
 
 
 
+def motor_de_evaluacion_recursivo(formula_string, price_list_id, context, mapa_variables, cache_variables):
+    cache_key = (formula_string, price_list_id)
+    if cache_key in cache_variables:
+        return cache_variables[cache_key]
+
+    variables_en_formula = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', formula_string)
+    contexto_local = context.copy()
+
+    for var_name in set(variables_en_formula):
+        if var_name in contexto_local:
+            continue
+
+        variables_especificas = mapa_variables.get(price_list_id, {})
+        variable_obj = variables_especificas.get(var_name)
+
+        if not variable_obj:
+            variables_globales = mapa_variables.get(1, {})
+            variable_obj = variables_globales.get(var_name)
+
+        if variable_obj:
+            if variable_obj.formula is None:
+                valor_variable = Decimal('0')
+            else:
+                valor_variable = motor_de_evaluacion_recursivo(variable_obj.formula, price_list_id, context, mapa_variables, cache_variables)
+            contexto_local[var_name] = valor_variable
+        else:
+            # LOG de variable faltante
+            print(f"⚠️ Variable '{var_name}' no encontrada en contexto ni en mapa_variables para price_list_id={price_list_id}")
+            contexto_local[var_name] = Decimal('0')
+
+    try:
+        resultado = Decimal(eval(formula_string, {"__builtins__": None}, contexto_local))
+        cache_variables[cache_key] = resultado
+        return resultado
+    except Exception as e:
+        print(f"❌ ERROR evaluando la fórmula '{formula_string}' con contexto {contexto_local}: {type(e)}")
+        return Decimal('0')
+
+
+# Función para normalizar cadenas
+def normalize_string(s):
+    if not isinstance(s, str):
+        return ""
+    s = re.sub(r'[\s\xa0-]+', ' ', s).strip()
+    return s.lower()
+
 @api_view(['POST'])
 def buscar_precios(request):
     try:
         filtros = request.data.get('filtros', {})
-        listas_seleccionadas = filtros.get('listas_precios', [])
+        listas_precios_nombres = filtros.get('listas_precios', [])
         marcas_seleccionadas = filtros.get('marcas', [])
-        fecha_especifica_str = filtros.get('fecha_especifica')
-        filtro_variacion = filtros.get('filtro_variacion')
+        referencia = filtros.get('referencia', '').strip()
+        filtro_variacion = filtros.get('filtro_variacion', '')
         filtro_promo = filtros.get('filtro_promo', False)
+        fecha_especifica_str = filtros.get('fecha_especifica')
 
-        qs = models.Lista_precio.objects.all().order_by('producto', 'nombre', '-dia')
-
-        if listas_seleccionadas:
-            qs = qs.filter(nombre__in=listas_seleccionadas)
-        if marcas_seleccionadas:
-            query_marcas = Q()
-            for marca in marcas_seleccionadas:
-                query_marcas |= Q(producto__istartswith=marca)
-            qs = qs.filter(query_marcas)
-
-        df = pd.DataFrame(list(qs.values('id', 'producto', 'nombre', 'valor', 'dia')))
-        if df.empty: return Response({'data': [], 'fecha_actual': 'N/A'})
-            
-        fecha_carga = None
+        fecha_filtro = None
         if fecha_especifica_str:
-            fecha_especifica = datetime.datetime.fromisoformat(fecha_especifica_str)
-            fecha_carga = fecha_especifica
-            
-            df_actual = df[df['dia'] <= fecha_especifica].drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
-            
-            ids_actuales = df_actual['id'].tolist()
-            productos_actuales = df_actual['producto'].tolist()
-            precios_anteriores = models.Lista_precio.objects.filter(producto__in=productos_actuales, dia__lt=fecha_especifica).exclude(id__in=ids_actuales).order_by('producto', '-dia')
-            df_anterior = pd.DataFrame(list(precios_anteriores.values('producto', 'valor')))
-            
-            if not df_anterior.empty:
-                df_anterior = df_anterior.drop_duplicates('producto', keep='first').rename(columns={'valor': 'valor_anterior'})
-                df_final = pd.merge(df_actual, df_anterior, on='producto', how='left')
-            else:
-                df_final = df_actual
-                df_final['valor_anterior'] = 0
-        else:
-            fecha_carga = df['dia'].max() 
-            df['valor_anterior'] = df.groupby(['producto', 'nombre'])['valor'].shift(-1)
-            df_final = df.drop_duplicates(subset=['producto', 'nombre'], keep='first').copy()
+            from django.utils.dateparse import parse_datetime
+            fecha_filtro = parse_datetime(fecha_especifica_str)
+
+        if not listas_precios_nombres:
+            return Response({'data': [], 'fecha_actual': 'N/A'})
+
+        productos_qs = models.Traducciones.objects.filter(active=True)
         
-        df_final.fillna({'valor_anterior': 0}, inplace=True)
-        df_final.rename(columns={'valor': 'valor_actual'}, inplace=True)
+        # --- Lógica de filtro de marcas mejorada ---
+        if marcas_seleccionadas:
+            # Creamos una lista de las marcas seleccionadas en minúsculas
+            marcas_bajas = [marca.lower() for marca in marcas_seleccionadas]
+            
+            # Filtramos los productos en memoria por la primera palabra del stok
+            productos_filtrados = [
+                p for p in productos_qs if normalize_string(p.stok).split(' ')[0] in marcas_bajas
+            ]
+            productos_qs = productos_filtrados
+        # ---------------------------------------------
+        
+        if referencia:
+            productos_qs = [
+                p for p in productos_qs if referencia in normalize_string(p.equipo) or referencia in normalize_string(p.stok)
+            ]
 
-        kit_list_names = ['descuento', 'Kit Sub', 'Kit Fintech', 'Kit Addi', 'Kit Valle']
-        productos_en_resultado = df_final['producto'].unique().tolist()
+        mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
+        
+        productos_lp_raw = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
+        producto_lp_a_stok = {
+            p_name: normalize_string(p_name)
+            for p_name in productos_lp_raw
+            if normalize_string(p_name) in mapa_traducciones
+        }
+        
+        stoks_encontrados_lp = list(producto_lp_a_stok.keys())
 
-        precios_kits_qs = models.Lista_precio.objects.filter(
-            producto__in=productos_en_resultado,
-            nombre__in=kit_list_names
+        if not stoks_encontrados_lp:
+            return Response({'data': [], 'fecha_actual': 'N/A'})
+
+        query_precios_actuales = models.Lista_precio.objects.filter(
+            producto__in=stoks_encontrados_lp,
+            nombre__in=listas_precios_nombres
         ).order_by('producto', 'nombre', '-dia')
         
-        df_kits = pd.DataFrame(list(precios_kits_qs.values('producto', 'nombre', 'valor', 'dia')))
-
-        if not df_kits.empty:
-            latest_kits = df_kits.drop_duplicates(subset=['producto', 'nombre'], keep='first')
-            df_kits_pivot = latest_kits.pivot_table(index='producto', columns='nombre', values='valor').reset_index()
-            df_final = pd.merge(df_final, df_kits_pivot, on='producto', how='left')
-
-        kit_column_names = [name.replace(' ', '_') for name in kit_list_names]
+        if fecha_filtro:
+            query_precios_actuales = query_precios_actuales.filter(dia__lte=fecha_filtro)
         
-        rename_dict = {name: name.replace(' ', '_') for name in kit_list_names if name in df_final.columns}
-        if rename_dict:
-            df_final.rename(columns=rename_dict, inplace=True)
-        
-        for col in kit_column_names:
-            if col not in df_final.columns:
-                df_final[col] = 0.0
-        
-        df_final.fillna(0, inplace=True)
+        precios_actuales = query_precios_actuales.distinct('producto', 'nombre')
 
-        df_final['variation'] = df_final.apply(calcular_variacion, axis=1)
-        df_final['indicador'] = df_final['variation'].apply(lambda x: x.get('indicador'))
-        df_final['Promo'] = df_final['descuento'] > 0
-        
-        if filtro_variacion: df_final = df_final[df_final['indicador'] == filtro_variacion]
-        if filtro_promo: df_final = df_final[df_final['Promo'] == True]
+        if not precios_actuales:
+            return Response({'data': [], 'fecha_actual': 'N/A'})
 
+        fecha_carga = precios_actuales.first().dia
+        
+        precios_anteriores = models.Lista_precio.objects.filter(
+            producto__in=stoks_encontrados_lp,
+            nombre__in=listas_precios_nombres,
+            dia__lt=fecha_carga
+        ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
+
+        mapa_precios_anteriores = { (p.producto, p.nombre): p.valor for p in precios_anteriores }
+
+        query_kits = models.Lista_precio.objects.filter(
+            producto__in=stoks_encontrados_lp,
+            nombre__icontains='Kit'
+        ).exclude(
+            nombre__icontains='Descuento Kit'
+        ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
+
+        if fecha_filtro:
+            query_kits = query_kits.filter(dia__lte=fecha_filtro)
+
+        mapa_kits = defaultdict(list)
+        for kit in query_kits:
+            stok_normalizado = producto_lp_a_stok.get(kit.producto)
+            if stok_normalizado:
+                mapa_kits[stok_normalizado].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
+        
         new_data = []
-        sim, base = Decimal('2000'), Decimal('1095578')
-        for _, row in df_final.iterrows():
-            valor_actual = Decimal(row.get('valor_actual', 0))
-            iva = valor_actual * Decimal('0.19') if valor_actual >= base else Decimal('0')
-            total = sim * Decimal('1.19') + valor_actual + iva
+        valor_sim = Decimal('2000')
+        iva_sim = valor_sim * Decimal('0.19')
+        base_iva_excluido = Decimal('1095578')
+        
+        for precio_actual in precios_actuales:
+            producto_stok_lp = precio_actual.producto
+            stok_normalizado = producto_lp_a_stok.get(producto_stok_lp)
             
-            kits_aplicados = []
-            for col_name in kit_column_names:
-                if col_name != 'descuento' and row.get(col_name, 0) > 0:
-                    kit_val = Decimal(row.get(col_name))
-                    kits_aplicados.append({'nombre': col_name.replace('_', ' ').capitalize(), 'valor': float(kit_val)})
-                    total += kit_val
+            if not stok_normalizado:
+                continue
+                
+            nombre_lista = precio_actual.nombre
+            valor_actual = precio_actual.valor
+            
+            nombre_equipo = producto_stok_lp
+            
+            valor_anterior = mapa_precios_anteriores.get((producto_stok_lp, nombre_lista))
+            
+            variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
+            if valor_anterior is not None and valor_anterior != 0:
+                diferencial = valor_actual - valor_anterior
+                indicador = 'up' if diferencial > 0 else 'down' if diferencial < 0 else 'neutral'
+                porcentaje = (diferencial / valor_anterior) * 100
+                variacion = {
+                    'indicador': indicador,
+                    'diferencial': float(diferencial),
+                    'porcentaje': round(float(porcentaje), 2),
+                }
 
-            tem_data = {
-                'equipo': row.get('producto'), 'nombre_lista': row.get('nombre'),
-                'precio simcard': float(sim), 'IVA simcard': float(sim * Decimal('0.19')),
-                'equipo sin IVA': float(valor_actual), 'IVA equipo': float(iva), 'total': float(total),
-                'valor_anterior': float(row.get('valor_anterior', 0)), 'indicador': row.get('variation').get('indicador'),
-                'diferencial': row.get('variation').get('diferencial'), 'porcentaje': row.get('variation').get('porcentaje'),
-                'kits': kits_aplicados
-            }
-            if row.get('Promo'): tem_data['Promo'] = 'PROMO'
-            new_data.append(tem_data)
+            if filtro_variacion and variacion['indicador'] != filtro_variacion:
+                continue
+
+            es_promo = False
+
+            if filtro_promo and not es_promo:
+                continue
+
+            iva_equipo = valor_actual * Decimal('0.19') if valor_actual > base_iva_excluido else Decimal('0')
+            
+            new_data.append({
+                'equipo': nombre_equipo,
+                'nombre_lista': nombre_lista,
+                'precio simcard': float(valor_sim),
+                'IVA simcard': float(iva_sim),
+                'equipo sin IVA': float(valor_actual),
+                'IVA equipo': float(iva_equipo),
+                'kits': mapa_kits.get(stok_normalizado, []),
+                'indicador': variacion['indicador'],
+                'diferencial': variacion['diferencial'],
+                'porcentaje': variacion['porcentaje'],
+                'valor_anterior': float(valor_anterior) if valor_anterior else 0,
+            })
 
         return Response({
             'data': new_data,
-            'fecha_actual': fecha_carga.strftime('%d de %B de %Y') if fecha_carga else "Varias Fechas"
+            'fecha_actual': fecha_carga.strftime('%d de %B de %Y') if fecha_carga else "N/A"
         })
+        
     except Exception as e:
         traceback.print_exc()
-        return Response({'error': f'Error interno: {str(e)}'}, status=500)
+        return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
     
 @api_view(['GET', 'POST', 'DELETE'])
 def black_list(request, id=None):
@@ -1661,20 +1752,30 @@ def guardar_precios(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
     
+    lista_de_precios = []
+    
     for precio in items:
-        for i in range(1,len(cabecera)):
-            producto = precio[0]
+        producto = precio[0]
+        # El resto de los valores en la lista 'precio' son los precios.
+        # Recorremos desde el índice 1, ya que el 0 es el nombre del producto.
+        for i in range(1, len(precio) - 1): # -1 porque el último item es el descuento
             nombre = cabecera[i]['text']
             valor = precio[i]
-            print(producto, nombre, valor)
-            models.Lista_precio.objects.create(
-                producto= producto,
-                nombre = nombre,
-                valor = valor
+            
+            # Creamos una instancia de Lista_precio, pero no la guardamos en la BD todavía
+            lista_de_precios.append(
+                models.Lista_precio(
+                    producto=producto,
+                    nombre=nombre,
+                    valor=valor
+                )
             )
             
-    return Response({'data':'data'})
-
+    # Con bulk_create, insertamos todos los objetos en una sola consulta
+    if lista_de_precios:
+        models.Lista_precio.objects.bulk_create(lista_de_precios)
+    
+    return Response({'data': 'Datos guardados exitosamente'})
 
 @api_view(['POST'])
 def consultar_formula(request):
@@ -2240,112 +2341,134 @@ def translate_products_prepago(request):
 
         return Response({'message':'equipo creado con exito'})
 
+# Helper function to clean currency values
+def limpiar_valor_moneda(valor):
+    if valor is None:
+        return Decimal('0')
+    try:
+        # If it's already a number, convert to Decimal and return
+        return Decimal(valor)
+    except InvalidOperation:
+        # If it's a string, clean it
+        if isinstance(valor, str):
+            # Remove '$', '.', and spaces, then convert
+            valor_limpio = valor.replace('$', '').replace('.', '').strip()
+            if valor_limpio:
+                return Decimal(valor_limpio)
+    return Decimal('0')
+
+
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
         iva = 1095578
-        # transnew = models.Traducciones.objects.create(
-        #     equipo='equipoejemplo',
-        #     stok='stokejemplo',
-        #     iva = True,
-        #     active= True,
-        #     tipo='prepago'
-        # )
-        # transnew.save()
-        data = requests.data
-        translates = (models.Traducciones.objects.filter(tipo='prepago'))
-        translates = [{
-            'equipo': item.equipo,
-            'stok': item.stok,
-            'iva': item.iva,
-            'active': item.active,
-            'tipo': item.tipo
-        } for item in translates]
+        
+        translates = models.Traducciones.objects.filter(tipo='prepago').values('equipo', 'stok', 'iva', 'active', 'tipo')
         df_translates = pd.DataFrame(translates)
+        
+        black_list = models.Lista_negra.objects.all().values_list('equipo', flat=True)
+        
+        data = requests.data
         df_equipos = pd.DataFrame(data)
-        black_list = models.Lista_negra.objects.all()
-        black_list = [item.equipo for item in black_list]
         df_equipos = df_equipos[~df_equipos[0].isin(black_list)]
-        df_equipos.columns = [
-            'equipo',
-            'valor', 
-            'descuento', 
-            'costo',
-            'precioConIva',
-        ]
-        equipos_origen = df_equipos[df_equipos.columns[0]]
+        df_equipos.columns = ['equipo', 'valor', 'descuento', 'costo', 'precioConIva']
+        
+        precios = models.Formula.objects.all().order_by('id')
+        
+        all_variables_prices = models.Variables_prices.objects.all().values()
+        variables_by_price = {}
+        for var in all_variables_prices:
+            price_id = var['price_id']
+            if price_id not in variables_by_price:
+                variables_by_price[price_id] = {}
+            variables_by_price[price_id][var['name']] = ' '.join(var['formula'].split())
+
+        equipos_origen = df_equipos['equipo']
         equipos_translate = df_translates['equipo']
         equipos_no_encontrados = equipos_origen[~equipos_origen.isin(equipos_translate)]
-        crediminuto = []
+
         if len(equipos_no_encontrados) > 0:
             validate = False
-            data = equipos_no_encontrados.to_list()
+            data_response = equipos_no_encontrados.to_list()
             cabecera = []
+            crediminuto = []
         else:
             validate = True
             nuevo_df = df_equipos.merge(df_translates, on='equipo', how='left')
             nuevo_df = nuevo_df.drop_duplicates()
-            data =[]
-            precios = models.Formula.objects.all()
-            cabecera = [{'text':'Equipo', 'value':'0'}]
+            
+            data_response = []
+            cabecera = [{'text': 'Equipo', 'value': '0'}]
+            
             contador = 1
-            for i in precios:
-                cabecera.append({'text':i.nombre, 'value':str(contador)})
+            for precio in precios:
+                cabecera.append({'text': precio.nombre, 'value': str(contador)})
                 contador += 1
-                if 'Precio Fintech' in i.nombre:
-                    cabecera.append({'text':'Kit Fintech', 'value':str(contador)})
+                if 'Precio Fintech' in precio.nombre:
+                    cabecera.append({'text': 'Kit Fintech', 'value': str(contador)})
                     contador += 1
-                elif 'Precio Addi' in i.nombre:
-                    cabecera.append({'text':'Kit Addi', 'value':str(contador)})
+                elif 'Precio Addi' in precio.nombre:
+                    cabecera.append({'text': 'Kit Addi', 'value': str(contador)})
                     contador += 1
-                elif 'Precio sub' in i.nombre:
-                    cabecera.append({'text':'Kit Sub', 'value':str(contador)})
+                elif 'Precio sub' in precio.nombre:
+                    cabecera.append({'text': 'Kit Sub', 'value': str(contador)})
                     contador += 1
-                elif 'Precio Adelantos Valle' in i.nombre:
-                    cabecera.append({'text':'Kit Valle', 'value':str(contador)})
+                elif 'Precio Adelantos Valle' in precio.nombre:
+                    cabecera.append({'text': 'Kit Valle', 'value': str(contador)})
                     contador += 1
-            cabecera.append({'text':'descuento', 'value':str(contador)})
-            lista_produtos = []
-            for index, row in nuevo_df.iterrows():
+            
+            cabecera.append({'text': 'descuento', 'value': str(contador)})
+            
+            lista_produtos = set()
+            formula_publico_obj = models.Formula.objects.filter(nombre='Precio publico').first()
+            formula2 = ' '.join(ast.literal_eval(formula_publico_obj.formula)) if formula_publico_obj else ''
+
+            for _, row in nuevo_df.iterrows():
                 if row['stok'] in lista_produtos:
                     continue
-                lista_produtos.append(row['stok'])
-                temp_data =[row['stok']]
+                lista_produtos.add(row['stok'])
+                
+                temp_data = [row['stok']]
                 for precio in precios:
-                    variables2 = models.Variables_prices.objects.filter(price=precio.price_id_id)
-                    variables2 = {variable.name : ' '.join(variable.formula.split()) for variable in variables2}
-                    if precio.price_id_id !=1:
-                        variables1 = models.Variables_prices.objects.filter(price=1)
-                        variables1 = {variable.name : ' '.join(variable.formula.split()) for variable in variables1}
-                        variables2 = variables1 | variables2
+                    variables2 = variables_by_price.get(precio.price_id_id, {})
+                    if precio.price_id_id != 1:
+                        variables1 = variables_by_price.get(1, {})
+                        variables2 = {**variables1, **variables2}
+                    
                     dict_formula = ast.literal_eval(precio.formula)
                     formula = ' '.join(dict_formula)
-                    consulta2 = models.Formula.objects.filter(nombre='Precio publico').first()
-                    formula_publico = consulta2.formula
-                    formula_lista = ast.literal_eval(formula_publico)
-                    formula2 = ' '.join(formula_lista)
+                    
                     if precio.id < 9:
                         formula = formula.replace('=','==')
                         formula = formula.replace('> ==','>=')
                         formula = formula.replace('< ==','<=')
                         formula = formula.replace('costo','Costo')
-                        formula = formula.replace('valor','<Valor')
+                        formula = formula.replace('valor','Valor')
                         formula = formula.replace('descuento','Descuento')
-                    formula = formula.replace('precioPublico',formula2)
-                    variables2 = variables2 | {'precioPublico':formula2, 'PrecioPublico':formula2, 'Sub': '', 'Premium': '', 'Fintech':'', 'Addi': '', 'Valle': ''}
+                    
+                    formula = formula.replace('precioPublico', formula2)
+                    variables2 = {**variables2, 'precioPublico': formula2, 'PrecioPublico': formula2, 'Sub': '', 'Premium': '', 'Fintech': '', 'Addi': '', 'Valle': ''}
+
                     for i in range(10):
                         for key, value in variables2.items():
-                            formula = formula.replace(key,value)      
+                            formula = formula.replace(key, value)
+                    
                     variables = {
-                        'Valor':row['valor'],
-                        'Costo':row['costo'],
-                        'Descuento':row['descuento'],
+                        'Valor': row['valor'],
+                        'Costo': row['costo'],
+                        'Descuento': row['descuento'],
                         'iva': iva,
                         'precioConIva': row['precioConIva']
                     }
+                    
                     kit = 0
                     kit_comprobante = False
-                    resultado = eval(formula, variables)
+                    
+                    try:
+                        resultado = eval(formula, variables)
+                    except NameError:
+                        resultado = 0 
+
                     if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre or 'Precio Adelantos Valle' in precio.nombre:
                         kit_comprobante = True
                         if resultado + 2380 >= iva and row['valor'] < iva:
@@ -2355,13 +2478,15 @@ def translate_prepago(requests):
                         kit_comprobante = True
                         if resultado < iva and row['valor'] >= iva:
                             kit = resultado * 0.19
+                    
                     temp_data.append(resultado)
                     if kit_comprobante:
                         temp_data.append(kit)
+                
                 temp_data.append(row['descuento'])
-                data.append(temp_data)
-            # print(cabecera)
-        return Response({'validate': validate, 'data':data, 'crediminuto':crediminuto, 'cabecera':cabecera})
+                data_response.append(temp_data)
+
+        return Response({'validate': validate, 'data': data_response, 'crediminuto': [], 'cabecera': cabecera})
 
 from rest_framework.views import APIView
 
