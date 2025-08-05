@@ -62,8 +62,7 @@ urlpatterns = [
     path('api/imagen-login/actualizar/', views.actualizar_imagen_login),
     path('historico-pendientes-cajero/', views.historico_pendientes_cajero, name='historico_pendientes_cajero'),
     path('get_filtros_precios/', views.get_filtros_precios, name='get_filtros_precios'),
-    path('buscar-precios/', views.buscar_precios, name='buscar_precios'),
-    path('buscar-precios-costo/', views.buscar_precios_costo, name='buscar_precios_costo'),
+    path('buscar-precios/', views.buscar_precios, name='buscar_precios'),   
 
 
 
