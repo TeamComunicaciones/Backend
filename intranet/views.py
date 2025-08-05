@@ -14,7 +14,9 @@ import uuid
 from datetime import date
 from decimal import Decimal
 from rest_framework import status
+from functools import reduce
 from collections import defaultdict
+import operator
 
 
 
@@ -479,17 +481,13 @@ def buscar_precios(request):
 
         productos_qs = models.Traducciones.objects.filter(active=True)
         
-        # --- Lógica de filtro de marcas mejorada ---
         if marcas_seleccionadas:
-            # Creamos una lista de las marcas seleccionadas en minúsculas
             marcas_bajas = [marca.lower() for marca in marcas_seleccionadas]
             
-            # Filtramos los productos en memoria por la primera palabra del stok
             productos_filtrados = [
                 p for p in productos_qs if normalize_string(p.stok).split(' ')[0] in marcas_bajas
             ]
             productos_qs = productos_filtrados
-        # ---------------------------------------------
         
         if referencia:
             productos_qs = [
@@ -549,6 +547,18 @@ def buscar_precios(request):
             if stok_normalizado:
                 mapa_kits[stok_normalizado].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
         
+        query_costos = models.Lista_precio.objects.filter(
+            producto__in=stoks_encontrados_lp,
+            nombre='Costo'
+        ).order_by('producto', '-dia').distinct('producto')
+        mapa_costos = {p.producto: p.valor for p in query_costos}
+        
+        query_descuentos = models.Lista_precio.objects.filter(
+            producto__in=stoks_encontrados_lp,
+            nombre='descuento'
+        ).order_by('producto', '-dia').distinct('producto')
+        mapa_descuentos = {p.producto: p.valor for p in query_descuentos}
+
         new_data = []
         valor_sim = Decimal('2000')
         iva_sim = valor_sim * Decimal('0.19')
@@ -582,12 +592,20 @@ def buscar_precios(request):
             if filtro_variacion and variacion['indicador'] != filtro_variacion:
                 continue
 
-            es_promo = False
+            costo = mapa_costos.get(producto_stok_lp, Decimal('0'))
+            descuento = mapa_descuentos.get(producto_stok_lp, Decimal('0'))
+
+            es_promo = descuento > 0
 
             if filtro_promo and not es_promo:
                 continue
 
             iva_equipo = valor_actual * Decimal('0.19') if valor_actual > base_iva_excluido else Decimal('0')
+            
+            # --- CAMBIO AQUI ---
+            # Se eliminó la resta de 2000 del Total Kit
+            total_kit_calculado = costo - descuento
+            # -------------------
             
             new_data.append({
                 'equipo': nombre_equipo,
@@ -601,6 +619,10 @@ def buscar_precios(request):
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
                 'valor_anterior': float(valor_anterior) if valor_anterior else 0,
+                'costo': float(costo),
+                'descuento': float(descuento),
+                'total_kit_calculado': float(total_kit_calculado),
+                'Promo': es_promo,
             })
 
         return Response({
@@ -1756,13 +1778,11 @@ def guardar_precios(request):
     
     for precio in items:
         producto = precio[0]
-        # El resto de los valores en la lista 'precio' son los precios.
-        # Recorremos desde el índice 1, ya que el 0 es el nombre del producto.
-        for i in range(1, len(precio) - 1): # -1 porque el último item es el descuento
+        # Bucle corregido para incluir el último elemento (el descuento)
+        for i in range(1, len(precio)): 
             nombre = cabecera[i]['text']
             valor = precio[i]
             
-            # Creamos una instancia de Lista_precio, pero no la guardamos en la BD todavía
             lista_de_precios.append(
                 models.Lista_precio(
                     producto=producto,
@@ -1771,7 +1791,6 @@ def guardar_precios(request):
                 )
             )
             
-    # Con bulk_create, insertamos todos los objetos en una sola consulta
     if lista_de_precios:
         models.Lista_precio.objects.bulk_create(lista_de_precios)
     
@@ -2357,6 +2376,39 @@ def limpiar_valor_moneda(valor):
                 return Decimal(valor_limpio)
     return Decimal('0')
 
+def debug_precio_publico(request):
+    try:
+        # 1. Obtenemos la lista de stoks de tus traducciones activas.
+        stoks_con_traduccion = list(models.Traducciones.objects.filter(active=True).values_list('stok', flat=True))
+
+        # 2. Hacemos la consulta EXACTA que está fallando:
+        # Buscamos en Lista_precio productos que estén en nuestra lista de stoks Y que el nombre sea 'Precio Publico' (ignorando mayúsculas).
+        resultados = models.Lista_precio.objects.filter(
+            producto__in=stoks_con_traduccion,
+            nombre__iexact='Precio Publico'  # Búsqueda insensible a mayúsculas
+        )
+
+        # 3. Preparamos una respuesta clara para ver qué encontró Django.
+        datos_encontrados = list(resultados.values('producto', 'nombre', 'valor'))
+        sql_query = str(resultados.query)
+
+        respuesta = {
+            "MENSAJE": "Resultados del diagnóstico directo a la base de datos.",
+            "PASO_1_STOKS_EN_TRADUCCIONES": {
+                "total_stoks_activos_encontrados": len(stoks_con_traduccion),
+                "ejemplo_de_stoks": stoks_con_traduccion[:10]
+            },
+            "PASO_2_RESULTADOS_DE_LA_CONSULTA": {
+                "total_precios_encontrados": len(datos_encontrados),
+                "ejemplo_de_precios": datos_encontrados[:10]
+            },
+            "SQL_EXACTO_EJECUTADO": sql_query
+        }
+        
+        return JsonResponse(respuesta, safe=False, json_dumps_params={'indent': 4})
+
+    except Exception as e:
+        return JsonResponse({"ERROR": str(e)})
 
 @api_view(['POST'])
 def translate_prepago(requests):
