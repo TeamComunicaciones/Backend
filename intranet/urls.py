@@ -63,6 +63,7 @@ urlpatterns = [
     path('historico-pendientes-cajero/', views.historico_pendientes_cajero, name='historico_pendientes_cajero'),
     path('get_filtros_precios/', views.get_filtros_precios, name='get_filtros_precios'),
     path('buscar-precios/', views.buscar_precios, name='buscar_precios'),   
+    path('get_reportes_por_fecha/', views.get_reportes_por_fecha, name='get-reportes-por-fecha'),
 
 
 
