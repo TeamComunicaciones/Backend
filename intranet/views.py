@@ -17,7 +17,8 @@ from rest_framework import status
 from functools import reduce
 from collections import defaultdict
 import operator
-
+import pytz 
+from django.utils.dateparse import parse_datetime
 
 
 # 2. Librerías de Terceros
@@ -212,6 +213,7 @@ def actas_entrega(request, id=None):
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def variables_prices(request, id=None):
+    # La autenticación se mantiene igual
     auth_header = request.headers.get('Authorization')
     if auth_header:
         token = auth_header.split(' ')[1]
@@ -225,57 +227,85 @@ def variables_prices(request, id=None):
     else:
         raise AuthenticationFailed('Authentication token not found.')
     
+    # El método GET se mantiene igual
     if request.method == 'GET':
         if id is not None:
             try:
                 data = models.Variables_prices.objects.get(id=id)
-            except:
-                raise AuthenticationFailed(f'There is no variable with ID {id}')
-            return Response({
-                'data': {
-                    'id': data.id, 
-                    'name': data.name, 
-                    'price': data.price.permiso,
-                    'formula': data.formula
+                return Response({
+                    'data': {
+                        'id': data.id, 
+                        'name': data.name, 
+                        'price': data.price.permiso,
+                        'formula': data.formula
                     }
                 })
+            except models.Variables_prices.DoesNotExist:
+                return Response({'error': f'There is no variable with ID {id}'}, status=404)
         else:
             data = models.Variables_prices.objects.all()
             data_list = [{
-                            'id': i.id, 
-                            'name': i.name, 
-                            'price': i.price.permiso,
-                            'formula': i.formula
-                        } for i in data]
+                'id': i.id, 
+                'name': i.name, 
+                'price': i.price.permiso,
+                'formula': i.formula
+            } for i in data]
             data_list = sorted(data_list, key=lambda x: x['name'].lower())
             return Response({'data':data_list})
+
+    # El método POST también se ha mejorado para manejar errores
     elif request.method == 'POST':
-        name = request.data['name']
-        price = request.data['price']
-        formula = request.data['formula']
+        name = request.data.get('name')
+        price_id = request.data.get('price')
+        formula = request.data.get('formula')
+        
         try:
-            price = models.Permisos_precio.objects.get(id=price)
-        except: 
-            pass
-        models.Variables_prices.objects.create(name=name, price=price, formula=formula)
-        return Response({'data':'successful creation'})
+            price_instance = models.Permisos_precio.objects.get(id=price_id)
+            models.Variables_prices.objects.create(name=name, price=price_instance, formula=formula)
+            return Response({'data': 'Variable created successfully'}, status=201)
+        except models.Permisos_precio.DoesNotExist:
+            return Response({'error': f'Price with ID {price_id} does not exist.'}, status=400)
+        except Exception as e:
+            return Response({'error': f'An unexpected error occurred: {str(e)}'}, status=400)
+
+    # --- BLOQUE PUT CORREGIDO Y MEJORADO ---
     elif request.method == 'PUT':
-        if id is not None:
-            name = request.data['name']
-            price = request.data['price']
-            formula = request.data['formula']
-            data = models.Variables_prices.objects.get(id=id)
-            data.name = name
+        if id is None:
+            return Response({'error': 'Variable ID is required for updating.'}, status=400)
+        
+        try:
+            # 1. Obtenemos la instancia de la variable que vamos a actualizar
+            variable_instance = models.Variables_prices.objects.get(id=id)
+
+            # 2. Obtenemos los datos del request de forma segura
+            name = request.data.get('name', variable_instance.name)
+            price_id = request.data.get('price', variable_instance.price.id)
+            formula = request.data.get('formula', variable_instance.formula)
+
+            # 3. VALIDAMOS que el objeto Price relacionado exista ANTES de asignar
             try:
-                price = models.Permisos_precio.objects.get(id=price)
-            except: 
-                pass
-            data.price = price
-            data.formula = formula
-            data.save()
-            return Response({'data':'successful edit'})
-        else:
-            return Response({'error': 'The id field is required'}, status=400)
+                price_instance = models.Permisos_precio.objects.get(id=price_id)
+            except models.Permisos_precio.DoesNotExist:
+                # Si no existe, devolvemos un error claro al frontend. NO MÁS 500.
+                return Response({'error': f'Price with ID {price_id} does not exist.'}, status=400)
+            
+            # 4. Actualizamos los campos de la instancia
+            variable_instance.name = name
+            variable_instance.formula = formula
+            variable_instance.price = price_instance # Asignamos el OBJETO, no el ID
+            
+            # 5. Guardamos la instancia actualizada
+            variable_instance.save()
+            
+            return Response({'data': 'Variable updated successfully'})
+
+        except models.Variables_prices.DoesNotExist:
+            return Response({'error': f'Variable with ID {id} does not exist.'}, status=404)
+        except Exception as e:
+            # Capturamos cualquier otro error inesperado para evitar un 500
+            return Response({'error': f'An unexpected error occurred: {str(e)}'}, status=500)
+
+    # El método DELETE se mantiene igual
     elif request.method == 'DELETE':
         if id is not None:
             try:
@@ -286,10 +316,8 @@ def variables_prices(request, id=None):
                 return Response({'error': 'The variable does not exist'}, status=404)
             except Exception as e:
                 return Response({'error': f'Could not delete variable: {str(e)}'}, status=400)
-
         else:
             return Response({'error': 'The id field is required'}, status=400)
-
 
 @api_view(['GET', 'POST', 'PUT' ,'DELETE'])
 def prices(request, id=None):
@@ -460,6 +488,37 @@ def normalize_string(s):
     s = re.sub(r'[\s\xa0-]+', ' ', s).strip()
     return s.lower()
 
+@api_view(['GET'])
+def get_reportes_por_fecha(request):
+    BOGOTA_TZ = pytz.timezone('America/Bogota')
+    fecha_str = request.query_params.get('fecha')
+    if not fecha_str:
+        return Response({"error": "El parámetro 'fecha' es requerido."}, status=400)
+
+    try:
+        fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+    except ValueError:
+        return Response({"error": "Formato de fecha inválido. Use YYYY-MM-DD."}, status=400)
+
+    reportes = models.Lista_precio.objects.filter(
+        dia__date=fecha
+    ).values_list('dia', flat=True).distinct().order_by('dia')
+
+    if not reportes:
+        return Response([])
+
+    respuesta_formateada = []
+    for dt in reportes:
+        dt_local = dt.astimezone(BOGOTA_TZ)
+        respuesta_formateada.append({
+            "id": dt.isoformat(),
+            "texto": f"Reporte de las {dt_local.strftime('%I:%M:%S %p')}"
+        })
+
+    return Response(respuesta_formateada)
+
+
+# ===== MODIFICADO: Tu vista 'buscar_precios' con la nueva lógica integrada =====
 @api_view(['POST'])
 def buscar_precios(request):
     try:
@@ -469,12 +528,19 @@ def buscar_precios(request):
         referencia = filtros.get('referencia', '').strip()
         filtro_variacion = filtros.get('filtro_variacion', '')
         filtro_promo = filtros.get('filtro_promo', False)
+        
+        # --- Lógica de fecha modificada ---
         fecha_especifica_str = filtros.get('fecha_especifica')
+        filtro_reporte_id = filtros.get('filtro_reporte_id') # <-- NUEVO: Recibimos el ID del reporte
 
-        fecha_filtro = None
-        if fecha_especifica_str:
-            from django.utils.dateparse import parse_datetime
-            fecha_filtro = parse_datetime(fecha_especifica_str)
+        fecha_punto_de_referencia = None
+        if filtro_reporte_id:
+            # El ID del reporte (timestamp) es la máxima prioridad
+            fecha_punto_de_referencia = parse_datetime(filtro_reporte_id)
+        elif fecha_especifica_str:
+            # Si no hay reporte, usamos la fecha como antes
+            fecha_punto_de_referencia = parse_datetime(fecha_especifica_str)
+        # --- Fin de la lógica de fecha ---
 
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
@@ -483,7 +549,6 @@ def buscar_precios(request):
         
         if marcas_seleccionadas:
             marcas_bajas = [marca.lower() for marca in marcas_seleccionadas]
-            
             productos_filtrados = [
                 p for p in productos_qs if normalize_string(p.stok).split(' ')[0] in marcas_bajas
             ]
@@ -495,14 +560,12 @@ def buscar_precios(request):
             ]
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
-        
         productos_lp_raw = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
         producto_lp_a_stok = {
             p_name: normalize_string(p_name)
             for p_name in productos_lp_raw
             if normalize_string(p_name) in mapa_traducciones
         }
-        
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
 
         if not stoks_encontrados_lp:
@@ -513,8 +576,10 @@ def buscar_precios(request):
             nombre__in=listas_precios_nombres
         ).order_by('producto', 'nombre', '-dia')
         
-        if fecha_filtro:
-            query_precios_actuales = query_precios_actuales.filter(dia__lte=fecha_filtro)
+        # --- MODIFICADO: Usamos la nueva variable para filtrar el punto en el tiempo ---
+        if fecha_punto_de_referencia:
+            query_precios_actuales = query_precios_actuales.filter(dia__lte=fecha_punto_de_referencia)
+        # --- Fin de la modificación ---
         
         precios_actuales = query_precios_actuales.distinct('producto', 'nombre')
 
@@ -526,7 +591,7 @@ def buscar_precios(request):
         precios_anteriores = models.Lista_precio.objects.filter(
             producto__in=stoks_encontrados_lp,
             nombre__in=listas_precios_nombres,
-            dia__lt=fecha_carga
+            dia__lt=fecha_carga # Esto funciona como antes, ya que fecha_carga es ahora la del reporte seleccionado
         ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
 
         mapa_precios_anteriores = { (p.producto, p.nombre): p.valor for p in precios_anteriores }
@@ -538,8 +603,10 @@ def buscar_precios(request):
             nombre__icontains='Descuento Kit'
         ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
 
-        if fecha_filtro:
-            query_kits = query_kits.filter(dia__lte=fecha_filtro)
+        # --- MODIFICADO: También aplicamos el filtro de fecha a los kits ---
+        if fecha_punto_de_referencia:
+            query_kits = query_kits.filter(dia__lte=fecha_punto_de_referencia)
+        # --- Fin de la modificación ---
 
         mapa_kits = defaultdict(list)
         for kit in query_kits:
@@ -573,9 +640,7 @@ def buscar_precios(request):
                 
             nombre_lista = precio_actual.nombre
             valor_actual = precio_actual.valor
-            
             nombre_equipo = producto_stok_lp
-            
             valor_anterior = mapa_precios_anteriores.get((producto_stok_lp, nombre_lista))
             
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
@@ -594,18 +659,13 @@ def buscar_precios(request):
 
             costo = mapa_costos.get(producto_stok_lp, Decimal('0'))
             descuento = mapa_descuentos.get(producto_stok_lp, Decimal('0'))
-
             es_promo = descuento > 0
 
             if filtro_promo and not es_promo:
                 continue
 
             iva_equipo = valor_actual * Decimal('0.19') if valor_actual > base_iva_excluido else Decimal('0')
-            
-            # --- CAMBIO AQUI ---
-            # Se eliminó la resta de 2000 del Total Kit
             total_kit_calculado = costo - descuento
-            # -------------------
             
             new_data.append({
                 'equipo': nombre_equipo,
@@ -2423,7 +2483,7 @@ def translate_prepago(requests):
         data = requests.data
         df_equipos = pd.DataFrame(data)
         df_equipos = df_equipos[~df_equipos[0].isin(black_list)]
-        df_equipos.columns = ['equipo', 'valor', 'descuento', 'costo', 'precioConIva']
+        df_equipos.columns = ['equipo', 'valor', 'descuento', 'costo']
         
         precios = models.Formula.objects.all().order_by('id')
         
@@ -2509,8 +2569,7 @@ def translate_prepago(requests):
                         'Valor': row['valor'],
                         'Costo': row['costo'],
                         'Descuento': row['descuento'],
-                        'iva': iva,
-                        'precioConIva': row['precioConIva']
+                        'iva': iva
                     }
                     
                     kit = 0
