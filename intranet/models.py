@@ -38,12 +38,24 @@ class Contactanos(models.Model):
     asunto = models.CharField(max_length=255, null=True)
     mensaje = models.TextField(null=True)
 
+class Carga(models.Model):
+    fecha_carga = models.DateTimeField(auto_now_add=True)
+    descripcion = models.CharField(max_length=255, blank=True, null=True)
+
+    def __str__(self):
+        return f"Carga del {self.fecha_carga.strftime('%Y-%m-%d %H:%M:%S')}"
 
 class Lista_precio(models.Model):
-    producto = models.CharField(max_length=100, null=True)  # Ajusta la longitud según tus necesidades
-    nombre = models.CharField(max_length=100, null=True)    # Ajusta la longitud según tus necesidades
-    valor = models.DecimalField(max_digits=10, decimal_places=2)  # Ajusta según tus necesidades
-    dia = models.DateTimeField(auto_now_add=True, null=True)
+    # Descomenta esta línea
+    carga = models.ForeignKey(Carga, on_delete=models.CASCADE, related_name='precios')
+
+    # BORRA esta línea
+    # dia = models.DateTimeField(auto_now_add=True, null=True)
+
+    producto = models.CharField(max_length=100, null=True)
+    nombre = models.CharField(max_length=100, null=True)
+    valor = models.DecimalField(max_digits=10, decimal_places=2)
+
 
 class Permisos_precio(models.Model):
     permiso = models.CharField(max_length=255, unique=True)
@@ -170,12 +182,6 @@ class ActaRecibidoPor(models.Model):
     acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     cargo = models.CharField(max_length=100, null=True, blank=True)
-
-
-class ActaArchivos(models.Model):
-    acta = models.ForeignKey(ActaEntrega, on_delete=models.CASCADE)
-    nombre_archivo = models.CharField(max_length=255)
-    ruta_archivo = models.CharField(max_length=500)
 
 
 class ActaArchivos(models.Model):
