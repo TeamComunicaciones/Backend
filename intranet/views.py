@@ -415,22 +415,18 @@ def get_filtros_precios(request):
             lista_precios_final = [{'id': id_lista, 'nombre': todas_las_listas_map[id_lista]} for id_lista in listas_permitidas_ids if id_lista in todas_las_listas_map]
         else:
             lista_precios_final = [{'id': k, 'nombre': v} for k, v in todas_las_listas_map.items()]
-
+        
         productos = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
         marcas = sorted(list(set([p.split(' ')[0].upper() for p in productos if p])))
         
-        nombre_real_del_campo_de_fecha = 'dia'
-
-        cargas = models.Lista_precio.objects.order_by(f'-{nombre_real_del_campo_de_fecha}').values_list(nombre_real_del_campo_de_fecha, flat=True).distinct()[:50]
+        cargas = models.Carga.objects.all().order_by('-fecha_carga')[:50]
         
         fechas_validas_formateadas = []
-        for fecha_carga in cargas:
-            if fecha_carga:
-                texto_fecha = fecha_carga.strftime("%d de %B de %Y - %H:%M")
-                fechas_validas_formateadas.append({
-                    "valor": fecha_carga.isoformat(),
-                    "texto": texto_fecha
-                })
+        for carga in cargas:
+            fechas_validas_formateadas.append({
+                "valor": carga.id,
+                "texto": carga.fecha_carga.strftime("%d de %B de %Y - %H:%M")
+            })
         
         return Response({
             'listas_precios': lista_precios_final,
@@ -518,34 +514,88 @@ def get_reportes_por_fecha(request):
     return Response(respuesta_formateada)
 
 
-# ===== MODIFICADO: Tu vista 'buscar_precios' con la nueva lógica integrada =====
+def should_show_kit(list_name, kit_name):
+    if not list_name or not kit_name:
+        return False
+    
+    list_lower = list_name.lower()
+    kit_lower = kit_name.lower()
+    keywords = ['addi', 'sub', 'fintech', 'valle']
+
+    has_keyword = any(kw in kit_lower for kw in keywords)
+    if not has_keyword:
+        return True
+
+    if 'addi' in kit_lower and 'addi' in list_lower:
+        return True
+    if 'sub' in kit_lower and 'sub' in list_lower:
+        return True
+    if 'fintech' in kit_lower and 'fintech' in list_lower:
+        return True
+    if 'valle' in kit_lower and 'valle' in list_lower:
+        return True
+        
+    return False
+
+def calculate_dynamic_total(item_data):
+    if not item_data:
+        return Decimal('0')
+
+    nombre_lista = item_data.get('nombre_lista', '').lower()
+    
+    if nombre_lista == 'costo':
+        costo = item_data.get('costo', Decimal('0'))
+        descuento = item_data.get('descuento', Decimal('0'))
+        return costo - descuento
+    
+    base_iva_excluido = Decimal('1095578')
+    valor_sim = Decimal('2000')
+    iva_sim = valor_sim * Decimal('0.19')
+
+    equipo_sin_iva = item_data.get('equipo_sin_iva', Decimal('0'))
+    iva_equipo = equipo_sin_iva * Decimal('0.19') if equipo_sin_iva > base_iva_excluido else Decimal('0')
+    
+    base_total = equipo_sin_iva + iva_equipo + valor_sim + iva_sim
+    
+    kit_total = Decimal('0')
+    kits = item_data.get('kits', [])
+    if kits:
+        for kit in kits:
+            if should_show_kit(item_data.get('nombre_lista'), kit.get('nombre')):
+                kit_total = Decimal(str(kit.get('valor', '0')))
+                break
+    
+    return base_total + kit_total
+
+# --- VISTA PARA BUSCAR PRECIOS (LÓGICA PRINCIPAL) ---
+
 @api_view(['POST'])
 def buscar_precios(request):
     try:
         filtros = request.data.get('filtros', {})
         listas_precios_nombres = filtros.get('listas_precios', [])
         marcas_seleccionadas = filtros.get('marcas', [])
-        referencia = filtros.get('referencia', '').strip()
+        referencia = filtros.get('referencia', '').strip().lower()
         filtro_variacion = filtros.get('filtro_variacion', '')
         filtro_promo = filtros.get('filtro_promo', False)
-        filtro_reporte_id = filtros.get('filtro_reporte_id')
+        carga_id_actual = filtros.get('fecha_especifica')
 
         carga_actual = None
         carga_anterior = None
 
-        if filtro_reporte_id:
-            try:
-                carga_actual = models.Carga.objects.get(id=filtro_reporte_id)
-                carga_anterior = models.Carga.objects.filter(fecha_carga__lt=carga_actual.fecha_carga).order_by('-fecha_carga').first()
-            except (models.Carga.DoesNotExist, ValueError):
-                return Response({'error': 'El reporte seleccionado no es válido.'}, status=404)
+        if not carga_id_actual:
+            carga_actual = models.Carga.objects.order_by('-fecha_carga').first()
         else:
-            todas_las_cargas = models.Carga.objects.all().order_by('-fecha_carga')
-            if todas_las_cargas.exists():
-                carga_actual = todas_las_cargas[0]
-            if todas_las_cargas.count() > 1:
-                carga_anterior = todas_las_cargas[1]
-        
+            try:
+                carga_actual = models.Carga.objects.get(id=carga_id_actual)
+            except models.Carga.DoesNotExist:
+                return Response({'error': 'La carga seleccionada no existe.'}, status=404)
+
+        if carga_actual:
+            carga_anterior = models.Carga.objects.filter(
+                fecha_carga__lt=carga_actual.fecha_carga
+            ).order_by('-fecha_carga').first()
+
         if not carga_actual:
             return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
 
@@ -553,28 +603,16 @@ def buscar_precios(request):
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
         productos_qs = models.Traducciones.objects.filter(active=True)
-        
         if marcas_seleccionadas:
-            marcas_bajas = [marca.lower() for marca in marcas_seleccionadas]
-            productos_filtrados = [
-                p for p in productos_qs if normalize_string(p.stok).split(' ')[0] in marcas_bajas
-            ]
-            productos_qs = productos_filtrados
-        
+            productos_qs = productos_qs.filter(stok__iregex=r'(' + '|'.join(marcas_seleccionadas) + r')\s')
         if referencia:
-            productos_qs = [
-                p for p in productos_qs if referencia in normalize_string(p.equipo) or referencia in normalize_string(p.stok)
-            ]
+            productos_qs = productos_qs.filter(Q(equipo__icontains=referencia) | Q(stok__icontains=referencia))
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
         
         productos_lp_raw = models.Lista_precio.objects.filter(carga=carga_actual).values_list('producto', flat=True).distinct()
         
-        producto_lp_a_stok = {
-            p_name: normalize_string(p_name)
-            for p_name in productos_lp_raw
-            if normalize_string(p_name) in mapa_traducciones
-        }
+        producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
 
         if not stoks_encontrados_lp:
@@ -597,17 +635,13 @@ def buscar_precios(request):
                 producto__in=stoks_encontrados_lp,
                 nombre__in=listas_precios_nombres
             )
-            mapa_precios_anteriores = {(p.producto, p.nombre): p.valor for p in precios_anteriores_qs}
+            mapa_precios_anteriores = {(p.producto.strip().lower(), p.nombre.strip().lower()): p.valor for p in precios_anteriores_qs}
 
-            costos_anteriores_qs = models.Lista_precio.objects.filter(
-                carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='Costo'
-            )
-            mapa_costos_anteriores = {p.producto: p.valor for p in costos_anteriores_qs}
+            costos_anteriores_qs = models.Lista_precio.objects.filter(carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='Costo')
+            mapa_costos_anteriores = {p.producto.strip().lower(): p.valor for p in costos_anteriores_qs}
 
-            descuentos_anteriores_qs = models.Lista_precio.objects.filter(
-                carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='descuento'
-            )
-            mapa_descuentos_anteriores = {p.producto: p.valor for p in descuentos_anteriores_qs}
+            descuentos_anteriores_qs = models.Lista_precio.objects.filter(carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='descuento')
+            mapa_descuentos_anteriores = {p.producto.strip().lower(): p.valor for p in descuentos_anteriores_qs}
 
             kits_anteriores_qs = models.Lista_precio.objects.filter(
                 carga=carga_anterior,
@@ -633,15 +667,12 @@ def buscar_precios(request):
                 mapa_kits[stok_normalizado].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
         
         query_costos = models.Lista_precio.objects.filter(carga=carga_actual, producto__in=stoks_encontrados_lp, nombre='Costo')
-        mapa_costos = {p.producto: p.valor for p in query_costos}
+        mapa_costos = {p.producto.strip().lower(): p.valor for p in query_costos}
         
         query_descuentos = models.Lista_precio.objects.filter(carga=carga_actual, producto__in=stoks_encontrados_lp, nombre='descuento')
-        mapa_descuentos = {p.producto: p.valor for p in query_descuentos}
+        mapa_descuentos = {p.producto.strip().lower(): p.valor for p in query_descuentos}
 
         new_data = []
-        valor_sim = Decimal('2000')
-        iva_sim = valor_sim * Decimal('0.19')
-        base_iva_excluido = Decimal('1095578')
         
         for precio_actual in precios_actuales:
             producto_stok_lp = precio_actual.producto
@@ -651,15 +682,34 @@ def buscar_precios(request):
                 continue
             
             nombre_lista = precio_actual.nombre
-            valor_actual = precio_actual.valor
-            nombre_equipo = producto_stok_lp
-            valor_anterior = mapa_precios_anteriores.get((producto_stok_lp, nombre_lista))
             
+            item_actual_data = {
+                'nombre_lista': nombre_lista,
+                'equipo_sin_iva': precio_actual.valor,
+                'costo': mapa_costos.get(producto_stok_lp.strip().lower(), Decimal('0')),
+                'descuento': mapa_descuentos.get(producto_stok_lp.strip().lower(), Decimal('0')),
+                'kits': mapa_kits.get(stok_normalizado, [])
+            }
+            total_actual = calculate_dynamic_total(item_actual_data)
+
+            valor_anterior = mapa_precios_anteriores.get((producto_stok_lp.strip().lower(), nombre_lista.strip().lower()))
+            item_anterior_data = None
+            if valor_anterior is not None:
+                item_anterior_data = {
+                    'nombre_lista': nombre_lista,
+                    'equipo_sin_iva': valor_anterior,
+                    'costo': mapa_costos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0')),
+                    'descuento': mapa_descuentos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0')),
+                    'kits': mapa_kits_anteriores.get(stok_normalizado, [])
+                }
+            
+            total_anterior = calculate_dynamic_total(item_anterior_data)
+
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
-            if valor_anterior is not None and valor_anterior != 0:
-                diferencial = valor_actual - valor_anterior
+            if total_anterior > 0:
+                diferencial = total_actual - total_anterior
                 indicador = 'up' if diferencial > 0 else 'down' if diferencial < 0 else 'neutral'
-                porcentaje = (diferencial / valor_anterior) * 100
+                porcentaje = (diferencial / total_anterior) * 100
                 variacion = {
                     'indicador': indicador,
                     'diferencial': float(diferencial),
@@ -669,39 +719,32 @@ def buscar_precios(request):
             if filtro_variacion and variacion['indicador'] != filtro_variacion:
                 continue
 
-            costo = mapa_costos.get(producto_stok_lp, Decimal('0'))
-            descuento = mapa_descuentos.get(producto_stok_lp, Decimal('0'))
-            es_promo = descuento > 0
-
+            es_promo = item_actual_data['descuento'] > 0
             if filtro_promo and not es_promo:
                 continue
 
-            iva_equipo = valor_actual * Decimal('0.19') if valor_actual > base_iva_excluido else Decimal('0')
-            total_kit_calculado = costo - descuento
-            
-            costo_anterior = mapa_costos_anteriores.get(producto_stok_lp, Decimal('0'))
-            descuento_anterior = mapa_descuentos_anteriores.get(producto_stok_lp, Decimal('0'))
-            kits_anteriores = mapa_kits_anteriores.get(stok_normalizado, [])
+            base_iva_excluido = Decimal('1095578')
+            iva_equipo = item_actual_data['equipo_sin_iva'] * Decimal('0.19') if item_actual_data['equipo_sin_iva'] > base_iva_excluido else Decimal('0')
 
             new_data.append({
-                'equipo': nombre_equipo,
+                'equipo': producto_stok_lp,
                 'nombre_lista': nombre_lista,
-                'precio simcard': float(valor_sim),
-                'IVA simcard': float(iva_sim),
-                'equipo sin IVA': float(valor_actual),
+                'precio simcard': float(Decimal('2000')),
+                'IVA simcard': float(Decimal('2000') * Decimal('0.19')),
+                'equipo sin IVA': float(item_actual_data['equipo_sin_iva']),
                 'IVA equipo': float(iva_equipo),
-                'kits': mapa_kits.get(stok_normalizado, []),
+                'kits': item_actual_data['kits'],
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
-                'costo': float(costo),
-                'descuento': float(descuento),
-                'total_kit_calculado': float(total_kit_calculado),
+                'costo': float(item_actual_data['costo']),
+                'descuento': float(item_actual_data['descuento']),
+                'total_kit_calculado': float(total_actual),
                 'Promo': es_promo,
-                'valor_anterior': float(valor_anterior) if valor_anterior else 0,
-                'costo_anterior': float(costo_anterior),
-                'descuento_anterior': float(descuento_anterior),
-                'kits_anteriores': kits_anteriores,
+                'valor_anterior': float(valor_anterior) if valor_anterior is not None else 0,
+                'costo_anterior': float(item_anterior_data['costo']) if item_anterior_data else 0,
+                'descuento_anterior': float(item_anterior_data['descuento']) if item_anterior_data else 0,
+                'kits_anteriores': item_anterior_data['kits'] if item_anterior_data else [],
             })
 
         return Response({
@@ -1853,25 +1896,31 @@ def guardar_precios(request):
     cabecera = request.data['cabecera']
     items = request.data['items']
     
-    lista_de_precios = []
+    if not items:
+        return Response({'error': 'No hay items para guardar.'}, status=400)
+
+    nueva_carga = models.Carga.objects.create()
     
-    for precio in items:
-        producto = precio[0]
-        # Bucle corregido para incluir el último elemento (el descuento)
-        for i in range(1, len(precio)): 
+    lista_de_precios_para_crear = []
+    
+    for precio_row in items:
+        producto = precio_row[0]
+        for i in range(1, len(precio_row)):
             nombre = cabecera[i]['text']
-            valor = precio[i]
+            valor = precio_row[i]
             
-            lista_de_precios.append(
-                models.Lista_precio(
-                    producto=producto,
-                    nombre=nombre,
-                    valor=valor
+            if valor is not None:
+                lista_de_precios_para_crear.append(
+                    models.Lista_precio(
+                        producto=producto,
+                        nombre=nombre,
+                        valor=valor,
+                        carga=nueva_carga
+                    )
                 )
-            )
             
-    if lista_de_precios:
-        models.Lista_precio.objects.bulk_create(lista_de_precios)
+    if lista_de_precios_para_crear:
+        models.Lista_precio.objects.bulk_create(lista_de_precios_para_crear)
     
     return Response({'data': 'Datos guardados exitosamente'})
 
@@ -2652,12 +2701,17 @@ class ListaProductosPrepagoEquipo(APIView):
         try:
             precio = request.data['precio']
             equipo = request.data['equipo']
-            qs = models.Lista_precio.objects.filter(producto=equipo, nombre=precio).order_by('-dia')
+            
+            qs = models.Lista_precio.objects.filter(
+                producto=equipo, 
+                nombre=precio
+            ).order_by('-carga__fecha_carga')
+            
             if not qs.exists():
                 return Response({'data': []})
             
-            df = pd.DataFrame(list(qs.values()))
-            df.rename(columns={'valor': 'valor_actual'}, inplace=True)
+            df = pd.DataFrame(list(qs.values('producto', 'valor', 'carga__fecha_carga')))
+            df.rename(columns={'valor': 'valor_actual', 'carga__fecha_carga': 'fecha'}, inplace=True)
             df['valor_anterior'] = df['valor_actual'].shift(-1)
             df.fillna({'valor_anterior': 0}, inplace=True)
             df['variation'] = df.apply(calcular_variacion, axis=1)
@@ -2673,7 +2727,7 @@ class ListaProductosPrepagoEquipo(APIView):
 
                 tem_data = {
                     'equipo': row.get('producto'),
-                    'fecha': row.get('dia'),
+                    'fecha': row.get('fecha'),
                     'equipo sin IVA': float(valor_actual),
                     'valor_anterior': float(row.get('valor_anterior', 0)),
                     'precio simcard': float(sim),
