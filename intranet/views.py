@@ -528,19 +528,26 @@ def buscar_precios(request):
         referencia = filtros.get('referencia', '').strip()
         filtro_variacion = filtros.get('filtro_variacion', '')
         filtro_promo = filtros.get('filtro_promo', False)
-        
-        # --- Lógica de fecha modificada ---
-        fecha_especifica_str = filtros.get('fecha_especifica')
-        filtro_reporte_id = filtros.get('filtro_reporte_id') # <-- NUEVO: Recibimos el ID del reporte
+        filtro_reporte_id = filtros.get('filtro_reporte_id')
 
-        fecha_punto_de_referencia = None
+        carga_actual = None
+        carga_anterior = None
+
         if filtro_reporte_id:
-            # El ID del reporte (timestamp) es la máxima prioridad
-            fecha_punto_de_referencia = parse_datetime(filtro_reporte_id)
-        elif fecha_especifica_str:
-            # Si no hay reporte, usamos la fecha como antes
-            fecha_punto_de_referencia = parse_datetime(fecha_especifica_str)
-        # --- Fin de la lógica de fecha ---
+            try:
+                carga_actual = models.Carga.objects.get(id=filtro_reporte_id)
+                carga_anterior = models.Carga.objects.filter(fecha_carga__lt=carga_actual.fecha_carga).order_by('-fecha_carga').first()
+            except (models.Carga.DoesNotExist, ValueError):
+                return Response({'error': 'El reporte seleccionado no es válido.'}, status=404)
+        else:
+            todas_las_cargas = models.Carga.objects.all().order_by('-fecha_carga')
+            if todas_las_cargas.exists():
+                carga_actual = todas_las_cargas[0]
+            if todas_las_cargas.count() > 1:
+                carga_anterior = todas_las_cargas[1]
+        
+        if not carga_actual:
+            return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
 
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
@@ -560,7 +567,9 @@ def buscar_precios(request):
             ]
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
-        productos_lp_raw = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
+        
+        productos_lp_raw = models.Lista_precio.objects.filter(carga=carga_actual).values_list('producto', flat=True).distinct()
+        
         producto_lp_a_stok = {
             p_name: normalize_string(p_name)
             for p_name in productos_lp_raw
@@ -571,59 +580,62 @@ def buscar_precios(request):
         if not stoks_encontrados_lp:
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
-        query_precios_actuales = models.Lista_precio.objects.filter(
+        precios_actuales = models.Lista_precio.objects.filter(
+            carga=carga_actual,
             producto__in=stoks_encontrados_lp,
             nombre__in=listas_precios_nombres
-        ).order_by('producto', 'nombre', '-dia')
-        
-        # --- MODIFICADO: Usamos la nueva variable para filtrar el punto en el tiempo ---
-        if fecha_punto_de_referencia:
-            query_precios_actuales = query_precios_actuales.filter(dia__lte=fecha_punto_de_referencia)
-        # --- Fin de la modificación ---
-        
-        precios_actuales = query_precios_actuales.distinct('producto', 'nombre')
+        )
 
-        if not precios_actuales:
-            return Response({'data': [], 'fecha_actual': 'N/A'})
+        mapa_precios_anteriores = {}
+        mapa_costos_anteriores = {}
+        mapa_descuentos_anteriores = {}
+        mapa_kits_anteriores = defaultdict(list)
 
-        fecha_carga = precios_actuales.first().dia
-        
-        precios_anteriores = models.Lista_precio.objects.filter(
-            producto__in=stoks_encontrados_lp,
-            nombre__in=listas_precios_nombres,
-            dia__lt=fecha_carga # Esto funciona como antes, ya que fecha_carga es ahora la del reporte seleccionado
-        ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
+        if carga_anterior:
+            precios_anteriores_qs = models.Lista_precio.objects.filter(
+                carga=carga_anterior,
+                producto__in=stoks_encontrados_lp,
+                nombre__in=listas_precios_nombres
+            )
+            mapa_precios_anteriores = {(p.producto, p.nombre): p.valor for p in precios_anteriores_qs}
 
-        mapa_precios_anteriores = { (p.producto, p.nombre): p.valor for p in precios_anteriores }
+            costos_anteriores_qs = models.Lista_precio.objects.filter(
+                carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='Costo'
+            )
+            mapa_costos_anteriores = {p.producto: p.valor for p in costos_anteriores_qs}
+
+            descuentos_anteriores_qs = models.Lista_precio.objects.filter(
+                carga=carga_anterior, producto__in=stoks_encontrados_lp, nombre='descuento'
+            )
+            mapa_descuentos_anteriores = {p.producto: p.valor for p in descuentos_anteriores_qs}
+
+            kits_anteriores_qs = models.Lista_precio.objects.filter(
+                carga=carga_anterior,
+                producto__in=stoks_encontrados_lp,
+                nombre__icontains='Kit'
+            ).exclude(nombre__icontains='Descuento Kit')
+            
+            for kit in kits_anteriores_qs:
+                stok_normalizado = producto_lp_a_stok.get(kit.producto)
+                if stok_normalizado:
+                    mapa_kits_anteriores[stok_normalizado].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
 
         query_kits = models.Lista_precio.objects.filter(
+            carga=carga_actual,
             producto__in=stoks_encontrados_lp,
             nombre__icontains='Kit'
-        ).exclude(
-            nombre__icontains='Descuento Kit'
-        ).order_by('producto', 'nombre', '-dia').distinct('producto', 'nombre')
-
-        # --- MODIFICADO: También aplicamos el filtro de fecha a los kits ---
-        if fecha_punto_de_referencia:
-            query_kits = query_kits.filter(dia__lte=fecha_punto_de_referencia)
-        # --- Fin de la modificación ---
-
+        ).exclude(nombre__icontains='Descuento Kit')
+        
         mapa_kits = defaultdict(list)
         for kit in query_kits:
             stok_normalizado = producto_lp_a_stok.get(kit.producto)
             if stok_normalizado:
                 mapa_kits[stok_normalizado].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
         
-        query_costos = models.Lista_precio.objects.filter(
-            producto__in=stoks_encontrados_lp,
-            nombre='Costo'
-        ).order_by('producto', '-dia').distinct('producto')
+        query_costos = models.Lista_precio.objects.filter(carga=carga_actual, producto__in=stoks_encontrados_lp, nombre='Costo')
         mapa_costos = {p.producto: p.valor for p in query_costos}
         
-        query_descuentos = models.Lista_precio.objects.filter(
-            producto__in=stoks_encontrados_lp,
-            nombre='descuento'
-        ).order_by('producto', '-dia').distinct('producto')
+        query_descuentos = models.Lista_precio.objects.filter(carga=carga_actual, producto__in=stoks_encontrados_lp, nombre='descuento')
         mapa_descuentos = {p.producto: p.valor for p in query_descuentos}
 
         new_data = []
@@ -637,7 +649,7 @@ def buscar_precios(request):
             
             if not stok_normalizado:
                 continue
-                
+            
             nombre_lista = precio_actual.nombre
             valor_actual = precio_actual.valor
             nombre_equipo = producto_stok_lp
@@ -667,6 +679,10 @@ def buscar_precios(request):
             iva_equipo = valor_actual * Decimal('0.19') if valor_actual > base_iva_excluido else Decimal('0')
             total_kit_calculado = costo - descuento
             
+            costo_anterior = mapa_costos_anteriores.get(producto_stok_lp, Decimal('0'))
+            descuento_anterior = mapa_descuentos_anteriores.get(producto_stok_lp, Decimal('0'))
+            kits_anteriores = mapa_kits_anteriores.get(stok_normalizado, [])
+
             new_data.append({
                 'equipo': nombre_equipo,
                 'nombre_lista': nombre_lista,
@@ -678,16 +694,19 @@ def buscar_precios(request):
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
-                'valor_anterior': float(valor_anterior) if valor_anterior else 0,
                 'costo': float(costo),
                 'descuento': float(descuento),
                 'total_kit_calculado': float(total_kit_calculado),
                 'Promo': es_promo,
+                'valor_anterior': float(valor_anterior) if valor_anterior else 0,
+                'costo_anterior': float(costo_anterior),
+                'descuento_anterior': float(descuento_anterior),
+                'kits_anteriores': kits_anteriores,
             })
 
         return Response({
             'data': new_data,
-            'fecha_actual': fecha_carga.strftime('%d de %B de %Y') if fecha_carga else "N/A"
+            'fecha_actual': carga_actual.fecha_carga.strftime('%d de %B de %Y')
         })
         
     except Exception as e:
@@ -2367,29 +2386,30 @@ def translate_products_prepago(request):
                 'active': i.active,
             }
             data.append(subdata)
-        data = sorted(data, key=lambda x: x['producto'].lower())    
+        data = sorted(data, key=lambda x: x['producto'].lower())
         return Response(data)
+    
     if request.method == 'POST':
         data = request.body
         data = json.loads(data)
         equipo = data['equipo'],
         stok = data['stok'],
-        iva = data['iva'] ,
-        active = data['active'] ,
+        iva = data['iva'],
+        active = data['active'],
         tipo = 'prepago'
         query = (
-            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "  
-            "FROM dbo.ldpProductosXAsociaciones lProd " 
-            "JOIN dbo.ldpListadePrecios  lPre ON lProd.ListaDePrecios = lPre.Codigo " 
-            "JOIN dbo.Productos  P ON lProd.Producto = P.Codigo " 
-            "JOIN dbo.TiposDeProducto  TP ON P.TipoDeProducto = TP.Codigo " 
+            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "
+            "FROM dbo.ldpProductosXAsociaciones lProd "
+            "JOIN dbo.ldpListadePrecios lPre ON lProd.ListaDePrecios = lPre.Codigo "
+            "JOIN dbo.Productos P ON lProd.Producto = P.Codigo "
+            "JOIN dbo.TiposDeProducto TP ON P.TipoDeProducto = TP.Codigo "
             f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1 and P.Nombre = '{stok[0]}';"
         )
         conexion = Sql_conexion(query)
         data2 = conexion.get_data()
         if len(data2) == 0:
             raise AuthenticationFailed('Producto inexistente en Stok')
-        
+
         listaStok = []
         for dato in data2:
             nombreStok = dato[0]
@@ -2399,26 +2419,52 @@ def translate_products_prepago(request):
             validacion = nstok == stok[0]
             if validacion == False:
                 raise AuthenticationFailed(f'intente usar {nstok} y no {stok[0]}')
-        
-        traduccion = models.Traducciones.objects.filter(equipo = request.data['equipo']).first()
+
+        traduccion = models.Traducciones.objects.filter(equipo=request.data['equipo']).first()
 
         if traduccion:
             traduccion.stok = listaStok[0]
             traduccion.iva
             traduccion.active
             traduccion.save()
-
         else:
             new_translate = models.Traducciones.objects.create(
                 equipo=request.data['equipo'],
                 stok=request.data['stok'],
-                iva =request.data['iva'] ,
-                active=request.data['active'] ,
-                tipo= 'prepago'
+                iva=request.data['iva'],
+                active=request.data['active'],
+                tipo='prepago'
             )
             new_translate.save()
+        
+        return Response({'message': 'equipo creado con exito'})
 
-        return Response({'message':'equipo creado con exito'})
+@api_view(['DELETE'])
+def delete_translate_product_admin(request):
+    try:
+        equipo_a_inactivar = request.data.get('equipo')
+        if not equipo_a_inactivar:
+            return Response(
+                {'error': 'El campo "equipo" es requerido.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        traduccion = models.Traducciones.objects.filter(equipo=equipo_a_inactivar).first()
+
+        if traduccion:
+            traduccion.active = '0'
+            traduccion.save()
+            return Response(
+                {'message': f'El producto "{equipo_a_inactivar}" fue enviado a la lista negra (inactivado).'},
+                status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                {'error': 'El producto no fue encontrado.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # Helper function to clean currency values
 def limpiar_valor_moneda(valor):
