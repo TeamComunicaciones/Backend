@@ -19,6 +19,7 @@ from collections import defaultdict
 import operator
 import pytz 
 from django.utils.dateparse import parse_datetime
+from django.views.decorators.csrf import csrf_exempt # <-- AÑADE ESTA LÍNEA
 
 
 # 2. Librerías de Terceros
@@ -801,6 +802,7 @@ def black_list(request, id=None):
 
 
 @api_view(['POST'])
+@csrf_exempt
 @transaction.atomic
 def settle_invoice(request):
     try:
@@ -824,18 +826,24 @@ def settle_invoice(request):
         )
 
         if len(consignaciones_a_saldar) != len(consignacion_ids):
-             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
+            return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
 
         total_calculado = sum(c.valor for c in consignaciones_a_saldar)
+
+        if len(fecha_str) > 7:
+            fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            recaudo_del_dia = models.Transacciones_sucursal.objects.filter(
+                codigo_incocredito=sucursal_code,
+                fecha__date=fecha_dia
+            ).aggregate(total=db_models.Sum('valor'))['total'] or Decimal('0')
+
+            if total_calculado > recaudo_del_dia:
+                error_msg = f"El monto a saldar ({total_calculado:,.0f}) excede el recaudo del día ({recaudo_del_dia:,.0f}). No se puede procesar."
+                return Response({'detail': error_msg.replace(",",".")}, status=400)
 
         for consignacion in consignaciones_a_saldar:
             consignacion.estado = 'saldado'
             consignacion.save()
-
-        if len(fecha_str) == 7:
-            fecha_obj = datetime.datetime.strptime(fecha_str + "-01", '%Y-%m-%d').date()
-        else:
-            fecha_obj = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
 
         referencias_text = ','.join(map(str, consignacion_ids))
 
@@ -843,8 +851,8 @@ def settle_invoice(request):
             valor=total_calculado,
             banco='Corresponsal Banco de Bogota',
             fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
-            fecha=fecha_obj,
-            responsable=usuario.id,
+            fecha=timezone.now(),  # <--- CAMBIO CLAVE: Usa siempre la fecha y hora actual
+            responsable=str(usuario.id),
             estado='Conciliado',
             detalle=saldar_data['detalle'],
             url='',
@@ -972,28 +980,23 @@ def select_consignaciones_corresponsal_cajero(request):
         fecha_inicio = timezone.make_aware(fecha_inicio_naive)
         fecha_fin = timezone.make_aware(fecha_fin_naive)
 
-        transacciones = models.Corresponsal_consignacion.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin), 
+        transacciones_base = models.Corresponsal_consignacion.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin),
             codigo_incocredito=sucursal
         )
+        
+        total_real = transacciones_base.exclude(
+             Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
+        ).aggregate(total=Sum('valor'))['total'] or 0
 
-        total_datos = 0
-        data_transacciones = []
+        detalles = list(transacciones_base.order_by('-id').values(
+            'id', 'banco', 'url', 'valor', 'estado'
+        ))
 
-        for t in transacciones:
-            total_datos += t.valor
-            data_transacciones.append({
-                'id': t.id,
-                'banco': t.banco,
-                'url': t.url,
-                'valor': t.valor,
-                'estado': getattr(t, 'estado', ''),
-            })
-            
-        return Response({'total': total_datos, 'detalles': data_transacciones})
+        return Response({'total': total_real, 'detalles': detalles})
 
     except Exception as e:
-        print(f"Error en select_consignaciones_corresponsal_cajero: {e}")
+        print(f"Error en select_consignaciones_corresponsal_cajero: {str(e)}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
 
 @api_view(['GET'])
@@ -1023,11 +1026,17 @@ def historico_pendientes_cajero(request):
             codigo_incocredito=sucursal_obj.codigo,
             fecha__range=(inicio_rango, hoy)
         ).annotate(dia=TruncDay('fecha')).values('dia').annotate(total_cajero=Sum('valor')).order_by('dia')
-
-        consignaciones_diarias = models.Corresponsal_consignacion.objects.filter(
+        
+        consignaciones_base = models.Corresponsal_consignacion.objects.filter(
             codigo_incocredito=sucursal_terminal,
             fecha__range=(inicio_rango, hoy)
-        ).annotate(dia=TruncDay('fecha')).values('dia').annotate(total_consignado=Sum('valor')).order_by('dia')
+        ).exclude(Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, '']))
+
+        consignaciones_diarias = consignaciones_base.annotate(
+            dia=TruncDay('fecha')
+        ).values('dia').annotate(
+            total_consignado=Sum('valor')
+        ).order_by('dia')
 
         df_transacciones = pd.DataFrame(list(transacciones_diarias))
         df_consignaciones = pd.DataFrame(list(consignaciones_diarias))
@@ -1069,8 +1078,7 @@ def historico_pendientes_cajero(request):
     except Exception as e:
         print(f"Error en historico_pendientes_cajero: {str(e)}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
-
-
+    
 def generate_unique_filename(original_name):
     import uuid
     from pathlib import Path
@@ -1221,25 +1229,48 @@ def resumen_corresponsal(request):
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
-        if len(fecha_str) == 7:
-            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
-            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
-        else:
-            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
-            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
-
-        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
-        fecha_fin = timezone.make_aware(fecha_fin_naive)
-        
         usuarios_dict = {user.id: user.username for user in User.objects.all()}
+        
+        if len(fecha_str) == 7: # Filtro por mes
+            year, month = map(int, fecha_str.split('-'))
+            
+            condicion_pendiente = Q(estado='pendiente', fecha__year=year, fecha__month=month)
+            
+            # --- SECCIÓN CORREGIDA ---
+            condicion_saldado_conciliado = Q(
+                estado__in=['saldado', 'Conciliado']
+            ) & (
+                Q(fecha__year=year, fecha__month=month) | 
+                Q(fecha_consignacion__year=year, fecha_consignacion__month=month)
+            )
+            # --- FIN DE SECCIÓN ---
+            
+            consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+                condicion_pendiente | condicion_saldado_conciliado
+            ).distinct()
+            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
+                fecha__year=year, fecha__month=month
+            )
 
-        consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin)
-        )
+        else: # Filtro por día
+            fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
 
-        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin)
-        )
+            condicion_pendiente = Q(estado='pendiente', fecha__date=fecha_dia)
+            
+            # --- SECCIÓN CORREGIDA ---
+            condicion_saldado_conciliado = Q(
+                estado__in=['saldado', 'Conciliado']
+            ) & (
+                Q(fecha__date=fecha_dia) | Q(fecha_consignacion=fecha_dia)
+            )
+            # --- FIN DE SECCIÓN ---
+
+            consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+                condicion_pendiente | condicion_saldado_conciliado
+            ).distinct()
+            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
+                fecha__date=fecha_dia
+            )
         
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
@@ -1253,7 +1284,7 @@ def resumen_corresponsal(request):
             titulo = 'Todas las sucursales'
 
         transacciones_data = []
-        for t in consignaciones_qs:
+        for t in consignaciones_qs.order_by('-id'):
             banco = getattr(t, 'banco', '')
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
             if banco == 'Venta doble proposito':
@@ -1268,25 +1299,36 @@ def resumen_corresponsal(request):
                     responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
                 except (ValueError, TypeError):
                     pass
-
-            transacciones_data.append({
-                'id': t.id, 'valor': getattr(t, 'valor', 0) or 0,
-                'banco': banco, 'fecha_consignacion': t.fecha_consignacion,
-                'responsable': responsable_username, 'estado': getattr(t, 'estado', ''),
+            
+            nueva_transaccion = {
+                'id': t.id,
+                'valor': getattr(t, 'valor', 0) or 0,
+                'banco': banco,
+                'fecha_consignacion': t.fecha_consignacion,
+                'fecha': t.fecha,
+                'responsable': responsable_username,
+                'estado': getattr(t, 'estado', ''),
                 'detalle': getattr(t, 'detalle', '') or '',
                 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''),
                 'detalle_categoria': detalle_categoria,
                 'url': getattr(t, 'url', None),
-            })
-
+                'min': getattr(t, 'min', None),
+                'imei': getattr(t, 'imei', None),
+                'planilla': getattr(t, 'planilla', None)
+            }
+            transacciones_data.append(nueva_transaccion)
+        
+        consignaciones_para_calculo = consignaciones_qs.exclude(
+            Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
+        )
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
-        total_consignado = sum(t['valor'] for t in transacciones_data if t['estado'] in ['saldado', 'Conciliado'])
-        total_pendiente = sum(t['valor'] for t in transacciones_data if t['estado'] == 'pendiente')
+        total_saldado = consignaciones_para_calculo.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
+        total_pendiente = consignaciones_para_calculo.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
         
         data = {
             'valor': valor_total_cajero,
             'titulo': titulo,
-            'consignacion': total_consignado,
+            'consignacion': total_saldado,
             'pendiente': total_pendiente,
             'consignaciones': transacciones_data
         }
@@ -1295,8 +1337,7 @@ def resumen_corresponsal(request):
     except Exception as e:
         print(f"ERROR en resumen_corresponsal: {str(e)}")
         return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
-
-
+    
 @api_view(['POST'])
 def select_datos_corresponsal(request):
     import datetime
