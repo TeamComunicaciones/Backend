@@ -124,7 +124,7 @@ class Responsable_corresponsal(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE)
 
 class Corresponsal_consignacion(models.Model):
-    valor = models.DecimalField(max_digits=10, decimal_places=2)
+    valor = models.DecimalField(max_digits=15, decimal_places=2)
     banco = models.CharField(max_length=100)
     fecha_consignacion = models.DateField()
     fecha = models.DateTimeField()
