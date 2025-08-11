@@ -20,7 +20,7 @@ import operator
 import pytz 
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt # <-- AÑADE ESTA LÍNEA
-
+import decimal
 
 # 2. Librerías de Terceros
 import jwt
@@ -538,37 +538,25 @@ def should_show_kit(list_name, kit_name):
         
     return False
 
-def calculate_dynamic_total(item_data):
-    if not item_data:
-        return Decimal('0')
-
-    nombre_lista = item_data.get('nombre_lista', '').lower()
-    
-    if nombre_lista == 'costo':
-        costo = item_data.get('costo', Decimal('0'))
-        descuento = item_data.get('descuento', Decimal('0'))
-        return costo - descuento
+def calculate_dynamic_total(equipo_sin_iva, kits):
+    if not isinstance(equipo_sin_iva, Decimal):
+        equipo_sin_iva = Decimal(str(equipo_sin_iva))
     
     base_iva_excluido = Decimal('1095578')
     valor_sim = Decimal('2000')
     iva_sim = valor_sim * Decimal('0.19')
 
-    equipo_sin_iva = item_data.get('equipo_sin_iva', Decimal('0'))
-    iva_equipo = equipo_sin_iva * Decimal('0.19') if equipo_sin_iva > base_iva_excluido else Decimal('0')
-    
-    base_total = equipo_sin_iva + iva_equipo + valor_sim + iva_sim
-    
+    iva_equipo = Decimal('0')
     kit_total = Decimal('0')
-    kits = item_data.get('kits', [])
-    if kits:
-        for kit in kits:
-            if should_show_kit(item_data.get('nombre_lista'), kit.get('nombre')):
-                kit_total = Decimal(str(kit.get('valor', '0')))
-                break
     
-    return base_total + kit_total
-
-# --- VISTA PARA BUSCAR PRECIOS (LÓGICA PRINCIPAL) ---
+    # Lógica de negocio para IVA y Kits
+    if equipo_sin_iva > base_iva_excluido:
+        iva_equipo = equipo_sin_iva * Decimal('0.19')
+    else:
+        kit_premium_valor = next((Decimal(str(k.get('valor', '0'))) for k in kits if k.get('nombre', '').lower() == 'kit premium'), Decimal('0'))
+        kit_total = kit_premium_valor
+    
+    return equipo_sin_iva + iva_equipo + valor_sim + iva_sim + kit_total
 
 @api_view(['POST'])
 def buscar_precios(request):
@@ -684,28 +672,23 @@ def buscar_precios(request):
             
             nombre_lista = precio_actual.nombre
             
-            item_actual_data = {
-                'nombre_lista': nombre_lista,
-                'equipo_sin_iva': precio_actual.valor,
-                'costo': mapa_costos.get(producto_stok_lp.strip().lower(), Decimal('0')),
-                'descuento': mapa_descuentos.get(producto_stok_lp.strip().lower(), Decimal('0')),
-                'kits': mapa_kits.get(stok_normalizado, [])
-            }
-            total_actual = calculate_dynamic_total(item_actual_data)
+            equipo_sin_iva_actual = precio_actual.valor
+            kits_actuales = mapa_kits.get(stok_normalizado, [])
+            total_actual = calculate_dynamic_total(equipo_sin_iva_actual, kits_actuales)
 
             valor_anterior = mapa_precios_anteriores.get((producto_stok_lp.strip().lower(), nombre_lista.strip().lower()))
-            item_anterior_data = None
-            if valor_anterior is not None:
-                item_anterior_data = {
-                    'nombre_lista': nombre_lista,
-                    'equipo_sin_iva': valor_anterior,
-                    'costo': mapa_costos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0')),
-                    'descuento': mapa_descuentos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0')),
-                    'kits': mapa_kits_anteriores.get(stok_normalizado, [])
-                }
             
-            total_anterior = calculate_dynamic_total(item_anterior_data)
-
+            total_anterior = Decimal('0')
+            kits_anteriores_to_send = []
+            if valor_anterior is not None:
+                equipo_sin_iva_anterior = Decimal(str(valor_anterior))
+                kits_anteriores_db = mapa_kits_anteriores.get(stok_normalizado, [])
+                
+                # Se calcula el total_anterior usando el mismo `calculate_dynamic_total`
+                # para que la lógica de IVA y Kit Premium sea idéntica.
+                total_anterior = calculate_dynamic_total(equipo_sin_iva_anterior, kits_anteriores_db)
+                kits_anteriores_to_send = kits_anteriores_db
+            
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
             if total_anterior > 0:
                 diferencial = total_actual - total_anterior
@@ -720,32 +703,51 @@ def buscar_precios(request):
             if filtro_variacion and variacion['indicador'] != filtro_variacion:
                 continue
 
-            es_promo = item_actual_data['descuento'] > 0
+            es_promo = mapa_descuentos.get(producto_stok_lp.strip().lower(), Decimal('0')) > 0
             if filtro_promo and not es_promo:
                 continue
 
             base_iva_excluido = Decimal('1095578')
-            iva_equipo = item_actual_data['equipo_sin_iva'] * Decimal('0.19') if item_actual_data['equipo_sin_iva'] > base_iva_excluido else Decimal('0')
+            iva_equipo = Decimal('0')
+            kits_data_to_send = kits_actuales
+            
+            # Formatear el IVA y el Kit Premium para el JSON de respuesta
+            if equipo_sin_iva_actual > base_iva_excluido:
+                iva_equipo = equipo_sin_iva_actual * Decimal('0.19')
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = 0.0
+                        break
+            else:
+                iva_as_kit_premium = equipo_sin_iva_actual * Decimal('0.19')
+                kit_found = False
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = float(iva_as_kit_premium)
+                        kit_found = True
+                        break
+                if not kit_found:
+                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
 
             new_data.append({
                 'equipo': producto_stok_lp,
                 'nombre_lista': nombre_lista,
                 'precio simcard': float(Decimal('2000')),
                 'IVA simcard': float(Decimal('2000') * Decimal('0.19')),
-                'equipo sin IVA': float(item_actual_data['equipo_sin_iva']),
+                'equipo sin IVA': float(equipo_sin_iva_actual),
                 'IVA equipo': float(iva_equipo),
-                'kits': item_actual_data['kits'],
+                'kits': kits_data_to_send,
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
-                'costo': float(item_actual_data['costo']),
-                'descuento': float(item_actual_data['descuento']),
+                'costo': float(mapa_costos.get(producto_stok_lp.strip().lower(), Decimal('0'))),
+                'descuento': float(mapa_descuentos.get(producto_stok_lp.strip().lower(), Decimal('0'))),
                 'total_kit_calculado': float(total_actual),
                 'Promo': es_promo,
                 'valor_anterior': float(valor_anterior) if valor_anterior is not None else 0,
-                'costo_anterior': float(item_anterior_data['costo']) if item_anterior_data else 0,
-                'descuento_anterior': float(item_anterior_data['descuento']) if item_anterior_data else 0,
-                'kits_anteriores': item_anterior_data['kits'] if item_anterior_data else [],
+                'costo_anterior': float(mapa_costos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0'))),
+                'descuento_anterior': float(mapa_descuentos_anteriores.get(producto_stok_lp.strip().lower(), Decimal('0'))),
+                'kits_anteriores': kits_anteriores_to_send,
             })
 
         return Response({
@@ -763,30 +765,29 @@ def black_list(request, id=None):
         data = models.Lista_negra.objects.all()
         data_list = [{'id': i.id, 'product': i.equipo} for i in data]
         data_list = sorted(data_list, key=lambda x: x['product'].lower())
-        return Response({"data":data_list})
+        return Response({"data": data_list})
+
     if request.method == 'POST':
-        token = request.data['jwt']
+        token = request.data.get('jwt')
+        product = request.data.get('product')
+
         if not token:
             raise AuthenticationFailed('Debes estar logueado')
-        else:
-            try:
-                payload = jwt.decode(token, 'secret', algorithms='HS256')
-                usuario = User.objects.get(username=payload['id'])
-            except jwt.ExpiredSignatureError:
-                raise AuthenticationFailed('Debes estar logueado')
-        product = request.data['product']
-        models.Lista_negra.objects.create(equipo= product)
-        return Response({"data":"successful creation"})
+        
+        if not product:
+            return Response({"error": "El campo 'product' es obligatorio."}, status=400)
+            
+        try:
+            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            usuario = User.objects.get(username=payload['id'])
+        except jwt.ExpiredSignatureError:
+            raise AuthenticationFailed('Debes estar logueado')
+
+        models.Lista_negra.objects.create(equipo=product)
+        return Response({"data": "successful creation"})
+
     if request.method == 'DELETE':
         if id is not None:
-            # token = request.data.get('jwt')
-            # if not token:
-            #     raise AuthenticationFailed('Debes estar logueado')
-            # try:
-            #     payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-            #     usuario = User.objects.get(username=payload['id'])
-            # except jwt.ExpiredSignatureError:
-            #     raise AuthenticationFailed('Debes estar logueado')
             try:
                 item = models.Lista_negra.objects.get(id=id)
                 item.delete()
@@ -795,11 +796,8 @@ def black_list(request, id=None):
                 return Response({"error": "El producto no existe"}, status=404)
             except Exception as e:
                 return Response({"error": f"No se pudo eliminar el producto: {str(e)}"}, status=400)
-
         else:
-                return Response({"error": "El campo 'id' es obligatorio"}, status=400)
-
-
+            return Response({"error": "El campo 'id' es obligatorio"}, status=400)
 
 @api_view(['POST'])
 @csrf_exempt
@@ -1944,26 +1942,52 @@ def guardar_precios(request):
     
     lista_de_precios_para_crear = []
     
+    # Creamos un diccionario para mapear los nombres de la cabecera a sus índices
+    header_map = {item['text']: i for i, item in enumerate(cabecera)}
+
+    # Identificamos el índice de la columna del producto
+    product_name_index = header_map.get('Equipo')
+
     for precio_row in items:
-        producto = precio_row[0]
-        for i in range(1, len(precio_row)):
-            nombre = cabecera[i]['text']
-            valor = precio_row[i]
-            
-            if valor is not None:
-                lista_de_precios_para_crear.append(
-                    models.Lista_precio(
-                        producto=producto,
-                        nombre=nombre,
-                        valor=valor,
-                        carga=nueva_carga
+        # Extraemos el nombre del producto de su columna correcta
+        if product_name_index is not None and product_name_index < len(precio_row):
+            producto = precio_row[product_name_index]
+        else:
+            # Si no se encuentra el nombre del producto, omitimos esta fila
+            continue
+
+        # Iteramos sobre todos los campos de la cabecera, excepto el del producto
+        for nombre_campo, index in header_map.items():
+            if nombre_campo == 'Equipo':
+                continue # Omitimos la columna del producto
+
+            if index < len(precio_row):
+                valor_raw = precio_row[index]
+                
+                # Validamos que el valor sea un número antes de intentar guardarlo
+                if valor_raw is not None:
+                    try:
+                        # Limpiamos el valor de comas (,) y lo convertimos a un decimal
+                        valor = decimal.Decimal(str(valor_raw).replace(',', ''))
+                    except (decimal.InvalidOperation, ValueError):
+                        # Si la conversión falla, mostramos un mensaje en la consola y saltamos este registro
+                        print(f"Omitiendo valor inválido '{valor_raw}' para el producto '{producto}' en el campo '{nombre_campo}'")
+                        continue
+                        
+                    lista_de_precios_para_crear.append(
+                        models.Lista_precio(
+                            producto=producto,
+                            nombre=nombre_campo,
+                            valor=valor,
+                            carga=nueva_carga
+                        )
                     )
-                )
-            
+    
     if lista_de_precios_para_crear:
         models.Lista_precio.objects.bulk_create(lista_de_precios_para_crear)
     
     return Response({'data': 'Datos guardados exitosamente'})
+
 
 @api_view(['POST'])
 def consultar_formula(request):
@@ -2463,10 +2487,19 @@ def permissions_edit(request):
     except Exception as e:
         return Response({'detail': f'Error inesperado al guardar: {str(e)}'}, status=500)
     
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework.exceptions import AuthenticationFailed
+import json
+from . import models
+from django.db.utils import IntegrityError
+
 @api_view(['GET', 'POST'])
 def translate_products_prepago(request):
     if request.method == 'GET':
-        traducciones = models.Traducciones.objects.filter(tipo='prepago')
+        productos_en_lista_negra = models.Lista_negra.objects.values_list('equipo', flat=True)
+        traducciones = models.Traducciones.objects.filter(tipo='prepago').exclude(equipo__in=productos_en_lista_negra)
+        
         data = []
         for i in traducciones:
             subdata = {
@@ -2476,58 +2509,64 @@ def translate_products_prepago(request):
                 'active': i.active,
             }
             data.append(subdata)
+        
         data = sorted(data, key=lambda x: x['producto'].lower())
         return Response(data)
     
     if request.method == 'POST':
-        data = request.body
-        data = json.loads(data)
-        equipo = data['equipo'],
-        stok = data['stok'],
-        iva = data['iva'],
-        active = data['active'],
-        tipo = 'prepago'
-        query = (
-            "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "
-            "FROM dbo.ldpProductosXAsociaciones lProd "
-            "JOIN dbo.ldpListadePrecios lPre ON lProd.ListaDePrecios = lPre.Codigo "
-            "JOIN dbo.Productos P ON lProd.Producto = P.Codigo "
-            "JOIN dbo.TiposDeProducto TP ON P.TipoDeProducto = TP.Codigo "
-            f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1 and P.Nombre = '{stok[0]}';"
-        )
-        conexion = Sql_conexion(query)
-        data2 = conexion.get_data()
-        if len(data2) == 0:
-            raise AuthenticationFailed('Producto inexistente en Stok')
-
-        listaStok = []
-        for dato in data2:
-            nombreStok = dato[0]
-            if nombreStok not in listaStok:
-                listaStok.append(nombreStok)
-        for nstok in listaStok:
-            validacion = nstok == stok[0]
-            if validacion == False:
-                raise AuthenticationFailed(f'intente usar {nstok} y no {stok[0]}')
-
-        traduccion = models.Traducciones.objects.filter(equipo=request.data['equipo']).first()
-
-        if traduccion:
-            traduccion.stok = listaStok[0]
-            traduccion.iva
-            traduccion.active
-            traduccion.save()
-        else:
-            new_translate = models.Traducciones.objects.create(
-                equipo=request.data['equipo'],
-                stok=request.data['stok'],
-                iva=request.data['iva'],
-                active=request.data['active'],
-                tipo='prepago'
+        try:
+            data = request.body
+            data = json.loads(data)
+            equipo = data['equipo']
+            stok = data['stok']
+            iva = data['iva']
+            active = data['active']
+            tipo = 'prepago'
+            
+            query = (
+                "SELECT TOP(1000) P.Nombre, lPre.nombre, ValorBruto "
+                "FROM dbo.ldpProductosXAsociaciones lProd "
+                "JOIN dbo.ldpListadePrecios lPre ON lProd.ListaDePrecios = lPre.Codigo "
+                "JOIN dbo.Productos P ON lProd.Producto = P.Codigo "
+                "JOIN dbo.TiposDeProducto TP ON P.TipoDeProducto = TP.Codigo "
+                f"WHERE TP.Nombre = 'Prepagos' and P.Visible = 1 and P.Nombre = '{stok}';"
             )
-            new_translate.save()
-        
-        return Response({'message': 'equipo creado con exito'})
+            conexion = Sql_conexion(query)
+            data2 = conexion.get_data()
+            if len(data2) == 0:
+                raise AuthenticationFailed('Producto inexistente en Stok')
+
+            listaStok = []
+            for dato in data2:
+                nombreStok = dato[0]
+                if nombreStok not in listaStok:
+                    listaStok.append(nombreStok)
+            for nstok in listaStok:
+                validacion = nstok == stok
+                if not validacion:
+                    raise AuthenticationFailed(f'intente usar {nstok} y no {stok}')
+
+            traduccion, created = models.Traducciones.objects.update_or_create(
+                equipo=equipo,
+                defaults={
+                    'stok': stok,
+                    'iva': iva,
+                    'active': active,
+                    'tipo': tipo
+                }
+            )
+            
+            if created:
+                return Response({'message': 'Equipo creado con exito'}, status=201)
+            else:
+                return Response({'message': 'Equipo actualizado con exito'}, status=200)
+
+        except KeyError:
+            return Response({'error': 'Faltan campos obligatorios'}, status=400)
+        except IntegrityError as e:
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
 
 @api_view(['DELETE'])
 def delete_translate_product_admin(request):
@@ -2639,7 +2678,6 @@ def translate_prepago(requests):
             validate = False
             data_response = equipos_no_encontrados.to_list()
             cabecera = []
-            crediminuto = []
         else:
             validate = True
             nuevo_df = df_equipos.merge(df_translates, on='equipo', how='left')
@@ -2657,6 +2695,9 @@ def translate_prepago(requests):
                     contador += 1
                 elif 'Precio Addi' in precio.nombre:
                     cabecera.append({'text': 'Kit Addi', 'value': str(contador)})
+                    contador += 1
+                elif 'Precio premium' in precio.nombre:
+                    cabecera.append({'text': 'Kit Premium', 'value': str(contador)})
                     contador += 1
                 elif 'Precio sub' in precio.nombre:
                     cabecera.append({'text': 'Kit Sub', 'value': str(contador)})
@@ -2721,9 +2762,13 @@ def translate_prepago(requests):
                         if resultado + 2380 >= iva and row['valor'] < iva:
                             kit = resultado - iva + 2380
                             resultado = iva - 2380
+                    elif 'Precio premium' in precio.nombre:
+                        kit_comprobante = True
+                        if row['valor'] >= iva:
+                           kit = resultado * 0.19
                     elif 'Precio sub' in precio.nombre:
                         kit_comprobante = True
-                        if resultado < iva and row['valor'] >= iva:
+                        if row['valor'] >= iva:
                             kit = resultado * 0.19
                     
                     temp_data.append(resultado)
