@@ -21,6 +21,9 @@ import pytz
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.csrf import csrf_exempt # <-- AÑADE ESTA LÍNEA
 import decimal
+from rest_framework.decorators import api_view, parser_classes # <-- LÍNEA CORREGIDA
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
 
 # 2. Librerías de Terceros
 import jwt
@@ -1084,80 +1087,83 @@ def generate_unique_filename(original_name):
     return f"{uuid.uuid4()}{extension}"
 
 @api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
 def consignacion_corresponsal(request):
-    if request.method == 'POST':
-        try:
-            data = request.data
-            token = data.get('jwt')
-            image = request.FILES.get('image')
-            sucursal = data.get('sucursal')
-            consignacion_data = json.loads(request.POST.get('data'))
-            fecha_reporte = datetime.datetime.strptime(data.get('fecha'), '%Y-%m-%d').date()
+    try:
+        # Usar request.data para acceder a todos los campos es más limpio
+        token = request.data.get('jwt')
+        image = request.data.get('image')
+        sucursal = request.data.get('sucursal')
+        consignacion_str = request.data.get('data')
+        fecha_reporte_str = request.data.get('fecha')
 
-            if not all([token, image, sucursal, consignacion_data]):
-                return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
+        if not all([token, image, sucursal, consignacion_str, fecha_reporte_str]):
+            return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
 
-            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-            usuario = User.objects.get(username=payload['id'])
+        consignacion_data = json.loads(consignacion_str)
+        fecha_reporte = datetime.datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-            tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-            client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-            client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
-            url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-            data_ms = {
-                'grant_type': 'client_credentials', 'client_id': client_id,
-                'client_secret': client_secret, 'scope': 'https://graph.microsoft.com/.default'
-            }
-            response_ms = requests.post(url, headers=headers, data=data_ms)
-            response_ms.raise_for_status()
-            access_token = response_ms.json().get('access_token')
+        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        usuario = User.objects.get(username=payload['id'])
 
-            headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
-            site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-            file_name = generate_unique_filename(image.name)
-            upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
-            response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
-            response_upload.raise_for_status()
+        # --- Lógica para subir a SharePoint (sin cambios) ---
+        tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+        client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+        client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        data_ms = {
+            'grant_type': 'client_credentials', 'client_id': client_id,
+            'client_secret': client_secret, 'scope': 'https://graph.microsoft.com/.default'
+        }
+        response_ms = requests.post(url, headers=headers, data=data_ms)
+        response_ms.raise_for_status()
+        access_token = response_ms.json().get('access_token')
 
-            banco_categoria = consignacion_data.get('banco')
+        headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
+        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+        file_name = generate_unique_filename(image.name)
+        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+        response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
+        response_upload.raise_for_status()
+        
+        # --- Lógica de guardado en la BD (sin cambios) ---
+        banco_categoria = consignacion_data.get('banco')
+        estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
+        detalle_banco_valor = None
+        if banco_categoria in ['Proveedores', 'Obligaciones financieras']:
+            detalle_banco_valor = consignacion_data.get('proveedor')
+        elif banco_categoria == 'Otros bancos':
+            detalle_banco_valor = consignacion_data.get('bancoDetalle')
+        elif banco_categoria == 'Impuestos':
+            detalle_banco_valor = consignacion_data.get('impuestoDetalle')
+
+        models.Corresponsal_consignacion.objects.create(
+            valor=consignacion_data.get('valor'),
+            banco=banco_categoria,
+            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+            fecha=fecha_reporte,
+            responsable=usuario.id,
+            estado=estado,
+            detalle=consignacion_data.get('detalle'),
+            url=file_name,
+            codigo_incocredito=sucursal,
+            detalle_banco=detalle_banco_valor,
+            min=consignacion_data.get('min') if banco_categoria == 'Venta doble proposito' else None,
+            imei=consignacion_data.get('imei') if banco_categoria == 'Venta doble proposito' else None,
+            planilla=consignacion_data.get('planilla') if banco_categoria == 'Venta doble proposito' else None,
+        )
+
+        return Response({'detail': 'Consignación registrada correctamente'}, status=200)
             
-            
-            estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
+    except User.DoesNotExist:
+        return Response({'detail': 'Usuario no válido'}, status=401)
+    except requests.exceptions.RequestException as e:
+        return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
+    except Exception as e:
+        print(f"ERROR en consignacion_corresponsal: {str(e)}")
+        return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
 
-            detalle_banco_valor = None
-            if banco_categoria in ['Proveedores', 'Obligaciones financieras']:
-                detalle_banco_valor = consignacion_data.get('proveedor')
-            elif banco_categoria == 'Otros bancos':
-                detalle_banco_valor = consignacion_data.get('bancoDetalle')
-            elif banco_categoria == 'Impuestos':
-                detalle_banco_valor = consignacion_data.get('impuestoDetalle')
-
-            models.Corresponsal_consignacion.objects.create(
-                valor=consignacion_data.get('valor'),
-                banco=banco_categoria,
-                fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
-                fecha=fecha_reporte,
-                responsable=usuario.id,
-                estado=estado,
-                detalle=consignacion_data.get('detalle'),
-                url=file_name,
-                codigo_incocredito=sucursal,
-                detalle_banco=detalle_banco_valor,
-                min=consignacion_data.get('min') if banco_categoria == 'Venta doble proposito' else None,
-                imei=consignacion_data.get('imei') if banco_categoria == 'Venta doble proposito' else None,
-                planilla=consignacion_data.get('planilla') if banco_categoria == 'Venta doble proposito' else None,
-            )
-
-            return Response({'detail': 'Consignación registrada correctamente'}, status=200)
-            
-        except User.DoesNotExist:
-            return Response({'detail': 'Usuario no válido'}, status=401)
-        except requests.exceptions.RequestException as e:
-            return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
-        except Exception as e:
-            print(f"ERROR en consignacion_corresponsal: {str(e)}")
-            return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
 
 
 @api_view(['GET', 'POST', 'PUT'])
