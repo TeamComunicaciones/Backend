@@ -10,6 +10,8 @@ import random
 import shutil
 import string
 import traceback
+from django.db.models import Q, Max
+
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -572,32 +574,6 @@ def buscar_precios(request):
         filtro_promo = filtros.get('filtro_promo', False)
         carga_id_actual = filtros.get('fecha_especifica')
 
-        carga_actual = None
-        carga_anterior = None
-        carga_anterior_a_la_anterior = None # Necesario para la comparación de variación
-
-        if not carga_id_actual:
-            carga_actual = models.Carga.objects.order_by('-fecha_carga').first()
-        else:
-            try:
-                carga_actual = models.Carga.objects.get(id=carga_id_actual)
-            except models.Carga.DoesNotExist:
-                return Response({'error': 'La carga seleccionada no existe.'}, status=404)
-
-        if not carga_actual:
-            return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
-        
-        # Encontramos la carga anterior a la "actual"
-        carga_anterior = models.Carga.objects.filter(
-            fecha_carga__lt=carga_actual.fecha_carga
-        ).order_by('-fecha_carga').first()
-
-        # Y la carga anterior a la "anterior"
-        if carga_anterior:
-            carga_anterior_a_la_anterior = models.Carga.objects.filter(
-                fecha_carga__lt=carga_anterior.fecha_carga
-            ).order_by('-fecha_carga').first()
-
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
@@ -609,194 +585,201 @@ def buscar_precios(request):
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
         
-        # Paso 1: Obtener todos los productos de ambas cargas (actual y anterior)
-        productos_qs_hoy = models.Lista_precio.objects.filter(
-            carga=carga_actual,
-            nombre__in=listas_precios_nombres
-        ).values_list('producto', flat=True).distinct()
-        
-        stoks_encontrados_hoy = {normalize_string(p) for p in productos_qs_hoy if normalize_string(p) in mapa_traducciones}
-        
-        productos_qs_ayer = models.Lista_precio.objects.filter(
-            carga=carga_anterior,
-            nombre__in=listas_precios_nombres
-        ).values_list('producto', flat=True).distinct()
-        
-        stoks_encontrados_ayer = {normalize_string(p) for p in productos_qs_ayer if normalize_string(p) in mapa_traducciones}
-
-        # Combinar los conjuntos de productos para tener una lista completa de lo que hay que mostrar
-        stoks_a_mostrar = stoks_encontrados_hoy.union(stoks_encontrados_ayer)
-        if not stoks_a_mostrar:
-            return Response({'data': [], 'fecha_actual': 'N/A'})
-
-        # Paso 2: Reestructurar la forma en que se obtienen los datos para ambas cargas
-        # Obtener todos los precios, kits, costos, descuentos de la carga ACTUAL
-        precios_actuales_dict = {(normalize_string(p.producto), normalize_string(p.nombre)): p for p in models.Lista_precio.objects.filter(
-            carga=carga_actual,
-            nombre__in=listas_precios_nombres
-        )}
-
-        mapa_kits_actuales = defaultdict(list)
-        for kit in models.Lista_precio.objects.filter(
-            carga=carga_actual,
-            producto__in=productos_qs_hoy,
-            nombre__icontains='Kit'
-        ).exclude(nombre__icontains='Descuento Kit'):
-            mapa_kits_actuales[normalize_string(kit.producto)].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
-        
-        mapa_costos_actuales = {normalize_string(p.producto): p.valor for p in models.Lista_precio.objects.filter(carga=carga_actual, nombre='Costo')}
-        mapa_descuentos_actuales = {normalize_string(p.producto): p.valor for p in models.Lista_precio.objects.filter(carga=carga_actual, nombre='descuento')}
-
-        # Obtener todos los precios, kits, costos, descuentos de la carga ANTERIOR
-        precios_anteriores_dict = {(normalize_string(p.producto), normalize_string(p.nombre)): p for p in models.Lista_precio.objects.filter(
-            carga=carga_anterior,
-            nombre__in=listas_precios_nombres
-        )}
-        
-        mapa_kits_anteriores = defaultdict(list)
-        for kit in models.Lista_precio.objects.filter(
-            carga=carga_anterior,
-            producto__in=productos_qs_ayer,
-            nombre__icontains='Kit'
-        ).exclude(nombre__icontains='Descuento Kit'):
-            mapa_kits_anteriores[normalize_string(kit.producto)].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
-
-        mapa_costos_anteriores = {normalize_string(p.producto): p.valor for p in models.Lista_precio.objects.filter(carga=carga_anterior, nombre='Costo')}
-        mapa_descuentos_anteriores = {normalize_string(p.producto): p.valor for p in models.Lista_precio.objects.filter(carga=carga_anterior, nombre='descuento')}
-
-        # Y los precios de la carga ANTERIOR A LA ANTERIOR para el cálculo de variación
-        precios_anterior_a_anterior_dict = {}
-        if carga_anterior_a_la_anterior:
-            precios_anterior_a_anterior_dict = {(normalize_string(p.producto), normalize_string(p.nombre)): p for p in models.Lista_precio.objects.filter(
-                carga=carga_anterior_a_la_anterior,
+        # Lógica unificada para obtener la carga actual y anterior
+        if carga_id_actual == 'todas':
+            latest_price_ids_subquery = (
+                models.Lista_precio.objects
+                .filter(nombre__in=listas_precios_nombres)
+                .values('producto', 'nombre')
+                .annotate(latest_id=Max('id'))
+                .values('latest_id')
+            )
+            precios_actuales_qs = models.Lista_precio.objects.filter(id__in=latest_price_ids_subquery).order_by('-carga__fecha_carga', '-id')
+            fecha_actual_str = 'Todas (últimos registros)'
+        else:
+            if not carga_id_actual:
+                carga_actual = models.Carga.objects.order_by('-fecha_carga').first()
+            else:
+                try:
+                    carga_actual = models.Carga.objects.get(id=carga_id_actual)
+                except models.Carga.DoesNotExist:
+                    return Response({'error': 'La carga seleccionada no existe.'}, status=404)
+            
+            if not carga_actual:
+                return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
+            
+            precios_actuales_qs = models.Lista_precio.objects.filter(
+                carga=carga_actual,
                 nombre__in=listas_precios_nombres
-            )}
-            # También los kits de esta carga para el cálculo de `total_anterior_a_anterior`
-            mapa_kits_anterior_a_anterior = defaultdict(list)
-            for kit in models.Lista_precio.objects.filter(
-                carga=carga_anterior_a_la_anterior,
-                producto__in=stoks_a_mostrar,
-                nombre__icontains='Kit'
-            ).exclude(nombre__icontains='Descuento Kit'):
-                mapa_kits_anterior_a_anterior[normalize_string(kit.producto)].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
+            )
+            fecha_actual_str = carga_actual.fecha_carga.strftime('%d de %B de %Y')
+            
+        productos_lp_raw = precios_actuales_qs.values_list('producto', flat=True).distinct()
+        producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
+        stoks_encontrados_lp = list(producto_lp_a_stok.keys())
+        if not stoks_encontrados_lp:
+            return Response({'data': [], 'fecha_actual': 'N/A'})
+            
+        precios_actuales = precios_actuales_qs.filter(producto__in=stoks_encontrados_lp)
 
-        new_data = []
-
-        # Paso 3: Iterar sobre todos los productos que deben mostrarse (unión de hoy y ayer)
-        for stok_normalizado in stoks_a_mostrar:
-            for nombre_lista in listas_precios_nombres:
-                # Determinar qué información usar: la de HOY si existe, o la de AYER si no
-                producto_hoy_key = (stok_normalizado, normalize_string(nombre_lista))
-                producto_ayer_key = (stok_normalizado, normalize_string(nombre_lista))
-
-                # Obtener los objetos de `Lista_precio` para hoy y ayer
-                precio_hoy_obj = precios_actuales_dict.get(producto_hoy_key)
-                precio_ayer_obj = precios_anteriores_dict.get(producto_ayer_key)
-                
-                # Usar el objeto de hoy si existe, de lo contrario, usar el de ayer
-                precio_a_usar = precio_hoy_obj if precio_hoy_obj else precio_ayer_obj
-                
-                if not precio_a_usar:
-                    continue
-
-                # Usar la carga más reciente para obtener los datos de Costo, Descuento y Kits
-                # Si el producto tiene un registro hoy, usamos los datos de hoy.
-                # Si no, usamos los datos de ayer.
-                if precio_hoy_obj:
-                    costo_actual = mapa_costos_actuales.get(stok_normalizado, Decimal('0'))
-                    descuento_actual = mapa_descuentos_actuales.get(stok_normalizado, Decimal('0'))
-                    kits_actuales = mapa_kits_actuales.get(stok_normalizado, [])
-                else: # Usar los datos de ayer
-                    costo_actual = mapa_costos_anteriores.get(stok_normalizado, Decimal('0'))
-                    descuento_actual = mapa_descuentos_anteriores.get(stok_normalizado, Decimal('0'))
-                    kits_actuales = mapa_kits_anteriores.get(stok_normalizado, [])
-
-                equipo_sin_iva_actual = precio_a_usar.valor
-                total_actual = calculate_dynamic_total(equipo_sin_iva_actual, kits_actuales)
-
-                # Buscar el valor anterior para el cálculo de variación
-                precio_anterior_obj = precios_anteriores_dict.get(producto_hoy_key) # Siempre comparamos contra la carga inmediatamente anterior a la que estamos mostrando
-                valor_anterior = Decimal('0')
-                kits_anteriores_to_send = []
-                total_anterior = Decimal('0')
-
-                if precio_anterior_obj:
-                    valor_anterior = precio_anterior_obj.valor
-                    kits_anteriores_db = mapa_kits_anteriores.get(stok_normalizado, [])
-                    total_anterior = calculate_dynamic_total(valor_anterior, kits_anteriores_db)
-                    kits_anteriores_to_send = kits_anteriores_db
-                
-                variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
-                if total_anterior > 0:
-                    diferencial = total_actual - total_anterior
-                    indicador = 'up' if diferencial > 0 else 'down' if diferencial < 0 else 'neutral'
-                    porcentaje = (diferencial / total_anterior) * 100
-                    variacion = {
-                        'indicador': indicador,
-                        'diferencial': float(diferencial),
-                        'porcentaje': round(float(porcentaje), 2),
-                    }
-                
-                if filtro_variacion and variacion['indicador'] != filtro_variacion:
-                    continue
-                
-                es_promo = descuento_actual > 0
-                if filtro_promo and not es_promo:
-                    continue
-                
-                base_iva_excluido = Decimal('1095578')
-                iva_equipo = Decimal('0')
-                kits_data_to_send = kits_actuales.copy()
-                
-                if equipo_sin_iva_actual > base_iva_excluido:
-                    iva_equipo = equipo_sin_iva_actual * Decimal('0.19')
-                    for kit in kits_data_to_send:
-                        if kit.get('nombre', '').lower() == 'kit premium':
-                            kit['valor'] = 0.0
-                            break
-                else:
-                    iva_as_kit_premium = equipo_sin_iva_actual * Decimal('0.19')
-                    kit_found = False
-                    for kit in kits_data_to_send:
-                        if kit.get('nombre', '').lower() == 'kit premium':
-                            kit['valor'] = float(iva_as_kit_premium)
-                            kit_found = True
-                            break
-                    if not kit_found:
-                        kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
-
-                # Usar el `producto` original del objeto de lista de precios, ya que no se normalizó
-                producto_original = precio_a_usar.producto
-
-                new_data.append({
-                    'equipo': producto_original,
-                    'nombre_lista': precio_a_usar.nombre,
-                    'precio simcard': float(Decimal('2000')),
-                    'IVA simcard': float(Decimal('2000') * Decimal('0.19')),
-                    'equipo sin IVA': float(equipo_sin_iva_actual),
-                    'IVA equipo': float(iva_equipo),
-                    'kits': kits_data_to_send,
-                    'indicador': variacion['indicador'],
-                    'diferencial': variacion['diferencial'],
-                    'porcentaje': variacion['porcentaje'],
-                    'costo': float(costo_actual),
-                    'descuento': float(descuento_actual),
-                    'total_kit_calculado': float(total_actual),
-                    'Promo': es_promo,
-                    'valor_anterior': float(valor_anterior) if valor_anterior is not None else 0,
-                    'costo_anterior': float(mapa_costos_anteriores.get(stok_normalizado, Decimal('0'))),
-                    'descuento_anterior': float(mapa_descuentos_anteriores.get(stok_normalizado, Decimal('0'))),
-                    'kits_anteriores': kits_anteriores_to_send,
-                })
-
-        return Response({
-            'data': new_data,
-            'fecha_actual': carga_actual.fecha_carga.strftime('%d de %B de %Y')
-        })
+        # Cargar todos los kits, costos y descuentos de una sola vez
+        cargas_ids_actual = precios_actuales.values_list('carga_id', flat=True).distinct()
         
+        # Obtener los precios anteriores
+        cargas_anteriores_map = {}
+        if carga_id_actual == 'todas':
+             cargas_anteriores = models.Carga.objects.filter(
+                id__in=cargas_ids_actual
+            ).annotate(
+                ultima_fecha_anterior=Max('fecha_carga', filter=Q(fecha_carga__lt=models.Carga.objects.get(id=cargas_ids_actual[0]).fecha_carga))
+            ).values_list('id', 'ultima_fecha_anterior')
+             for id_carga, fecha_anterior in cargas_anteriores:
+                if fecha_anterior:
+                    carga_anterior_obj = models.Carga.objects.filter(fecha_carga=fecha_anterior).first()
+                    if carga_anterior_obj:
+                        cargas_anteriores_map[id_carga] = carga_anterior_obj.id
+        else:
+            carga_actual_obj = models.Carga.objects.get(id=carga_id_actual) if carga_id_actual else models.Carga.objects.order_by('-fecha_carga').first()
+            carga_anterior_obj = models.Carga.objects.filter(fecha_carga__lt=carga_actual_obj.fecha_carga).order_by('-fecha_carga').first()
+            if carga_anterior_obj:
+                cargas_anteriores_map[carga_actual_obj.id] = carga_anterior_obj.id
+
+        carga_ids_anterior = list(cargas_anteriores_map.values())
+        
+        precios_anteriores_qs = models.Lista_precio.objects.filter(
+            carga_id__in=carga_ids_anterior,
+            producto__in=stoks_encontrados_lp,
+            nombre__in=listas_precios_nombres
+        )
+
+        all_precios_data = list(precios_actuales) + list(precios_anteriores_qs)
+        all_kits_data = models.Lista_precio.objects.filter(
+            carga_id__in=list(cargas_ids_actual) + carga_ids_anterior,
+            producto__in=stoks_encontrados_lp,
+            nombre__icontains='Kit'
+        ).exclude(nombre__icontains='Descuento Kit')
+        all_costos_data = models.Lista_precio.objects.filter(
+            carga_id__in=list(cargas_ids_actual) + carga_ids_anterior,
+            producto__in=stoks_encontrados_lp,
+            nombre='Costo'
+        )
+        all_descuentos_data = models.Lista_precio.objects.filter(
+            carga_id__in=list(cargas_ids_actual) + carga_ids_anterior,
+            producto__in=stoks_encontrados_lp,
+            nombre='descuento'
+        )
+
+        # Crear mapas para acceso rápido
+        mapa_precios = defaultdict(dict)
+        mapa_kits = defaultdict(list)
+        mapa_costos = {}
+        mapa_descuentos = {}
+
+        for p in all_precios_data:
+            key = (p.producto.strip().lower(), p.nombre.strip().lower(), p.carga_id)
+            mapa_precios[key] = p.valor
+
+        for kit in all_kits_data:
+            key = (kit.producto.strip().lower(), kit.carga_id)
+            mapa_kits[key].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
+        
+        for costo in all_costos_data:
+            key = (costo.producto.strip().lower(), costo.carga_id)
+            mapa_costos[key] = costo.valor
+
+        for descuento in all_descuentos_data:
+            key = (descuento.producto.strip().lower(), descuento.carga_id)
+            mapa_descuentos[key] = descuento.valor
+            
+        new_data = []
+        base_iva_excluido = Decimal('1095578')
+        
+        for precio_actual in precios_actuales:
+            prod_raw = precio_actual.producto
+            prod_lower = prod_raw.strip().lower()
+            nombre_lista = precio_actual.nombre
+            carga_id = precio_actual.carga_id
+
+            equipo_sin_iva_actual = precio_actual.valor
+            kits_actuales = mapa_kits.get((prod_lower, carga_id), [])
+            total_actual = calculate_dynamic_total(equipo_sin_iva_actual, kits_actuales)
+
+            # Obtener datos anteriores del mapa
+            carga_id_anterior = cargas_anteriores_map.get(carga_id)
+            valor_anterior_bruto = None
+            total_anterior = Decimal('0')
+            kits_anteriores_to_send = []
+            
+            if carga_id_anterior:
+                key_anterior = (prod_lower, nombre_lista.strip().lower(), carga_id_anterior)
+                valor_anterior_bruto = mapa_precios.get(key_anterior)
+                if valor_anterior_bruto is not None:
+                    kits_anteriores = mapa_kits.get((prod_lower, carga_id_anterior), [])
+                    total_anterior = calculate_dynamic_total(Decimal(str(valor_anterior_bruto)), kits_anteriores)
+                    kits_anteriores_to_send = kits_anteriores
+            
+            # Cálculo de variación
+            variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
+            if total_anterior > 0:
+                diferencial = total_actual - total_anterior
+                indicador = 'up' if diferencial > 0 else 'down' if diferencial < 0 else 'neutral'
+                porcentaje = (diferencial / total_anterior) * 100
+                variacion = {'indicador': indicador, 'diferencial': float(diferencial), 'porcentaje': round(float(porcentaje), 2)}
+            
+            if filtro_variacion and variacion['indicador'] != filtro_variacion:
+                continue
+
+            es_promo = Decimal(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))) > 0
+            if filtro_promo and not es_promo:
+                continue
+            
+            # Lógica de IVA
+            iva_equipo = Decimal('0')
+            kits_data_to_send = [dict(k) for k in kits_actuales]
+            if equipo_sin_iva_actual > base_iva_excluido:
+                iva_equipo = equipo_sin_iva_actual * Decimal('0.19')
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = 0.0
+                        break
+            else:
+                iva_as_kit_premium = equipo_sin_iva_actual * Decimal('0.19')
+                kit_found = False
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = float(iva_as_kit_premium)
+                        kit_found = True
+                        break
+                if not kit_found:
+                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
+
+            new_data.append({
+                'equipo': prod_raw,
+                'nombre_lista': nombre_lista,
+                'precio simcard': float(Decimal('2000')),
+                'IVA simcard': float(Decimal('2000') * Decimal('0.19')),
+                'equipo sin IVA': float(equipo_sin_iva_actual),
+                'IVA equipo': float(iva_equipo),
+                'kits': kits_data_to_send,
+                'indicador': variacion['indicador'],
+                'diferencial': variacion['diferencial'],
+                'porcentaje': variacion['porcentaje'],
+                'costo': float(mapa_costos.get((prod_lower, carga_id), Decimal('0'))),
+                'descuento': float(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))),
+                'total_kit_calculado': float(total_actual),
+                'Promo': es_promo,
+                'valor_anterior': float(valor_anterior_bruto) if valor_anterior_bruto is not None else 0,
+                'costo_anterior': float(mapa_costos.get((prod_lower, carga_id_anterior), Decimal('0'))) if carga_id_anterior else 0.0,
+                'descuento_anterior': float(mapa_descuentos.get((prod_lower, carga_id_anterior), Decimal('0'))) if carga_id_anterior else 0.0,
+                'kits_anteriores': [dict(k) for k in kits_anteriores_to_send],
+            })
+
+        return Response({'data': new_data, 'fecha_actual': fecha_actual_str})
+
     except Exception as e:
         traceback.print_exc()
         return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
+
     
 @api_view(['GET', 'POST', 'DELETE'])
 def black_list(request, id=None):
