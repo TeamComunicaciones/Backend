@@ -11,6 +11,7 @@ import shutil
 import string
 import traceback
 from django.db.models import Q, Max
+from django.db.models import Sum
 
 import uuid
 from datetime import date
@@ -855,7 +856,7 @@ def settle_invoice(request):
             recaudo_del_dia = models.Transacciones_sucursal.objects.filter(
                 codigo_incocredito=sucursal_code,
                 fecha__date=fecha_dia
-            ).aggregate(total=db_models.Sum('valor'))['total'] or Decimal('0')
+            ).aggregate(total=Sum('valor'))['total'] or Decimal('0')  # CAMBIO AQUÍ
 
             if total_calculado > recaudo_del_dia:
                 error_msg = f"El monto a saldar ({total_calculado:,.0f}) excede el recaudo del día ({recaudo_del_dia:,.0f}). No se puede procesar."
