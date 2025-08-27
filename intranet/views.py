@@ -851,16 +851,17 @@ def settle_invoice(request):
 
         total_calculado = sum(c.valor for c in consignaciones_a_saldar)
 
-        if len(fecha_str) > 7:
-            fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            recaudo_del_dia = models.Transacciones_sucursal.objects.filter(
-                codigo_incocredito=sucursal_code,
-                fecha__date=fecha_dia
-            ).aggregate(total=Sum('valor'))['total'] or Decimal('0')  # CAMBIO AQUÍ
-
-            if total_calculado > recaudo_del_dia:
-                error_msg = f"El monto a saldar ({total_calculado:,.0f}) excede el recaudo del día ({recaudo_del_dia:,.0f}). No se puede procesar."
-                return Response({'detail': error_msg.replace(",",".")}, status=400)
+        # Se ha eliminado el bloque de validación
+        # if len(fecha_str) > 7:
+        #    fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+        #    recaudo_del_dia = models.Transacciones_sucursal.objects.filter(
+        #        codigo_incocredito=sucursal_code,
+        #        fecha__date=fecha_dia
+        #    ).aggregate(total=Sum('valor'))['total'] or Decimal('0')  # CAMBIO AQUÍ
+        #
+        #    if total_calculado > recaudo_del_dia:
+        #        error_msg = f"El monto a saldar ({total_calculado:,.0f}) excede el recaudo del día ({recaudo_del_dia:,.0f}). No se puede procesar."
+        #        return Response({'detail': error_msg.replace(",",".")}, status=400)
 
         for consignacion in consignaciones_a_saldar:
             consignacion.estado = 'saldado'
@@ -1244,6 +1245,8 @@ def encargados_corresponsal(request):
     }
     return Response(data)
 
+
+
 @api_view(['POST'])
 def resumen_corresponsal(request):
     try:
@@ -1253,49 +1256,28 @@ def resumen_corresponsal(request):
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
-        usuarios_dict = {user.id: user.username for user in User.objects.all()}
+        # --- LÓGICA DE FILTRADO CORREGIDA Y SIMPLIFICADA ---
         
+        # 1. Definir el filtro de fecha principal
         if len(fecha_str) == 7: # Filtro por mes
             year, month = map(int, fecha_str.split('-'))
-            
-            condicion_pendiente = Q(estado='pendiente', fecha__year=year, fecha__month=month)
-            
-            # --- SECCIÓN CORREGIDA ---
-            condicion_saldado_conciliado = Q(
-                estado__in=['saldado', 'Conciliado']
-            ) & (
-                Q(fecha__year=year, fecha__month=month) | 
-                Q(fecha_consignacion__year=year, fecha_consignacion__month=month)
-            )
-            # --- FIN DE SECCIÓN ---
-            
-            consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
-                condicion_pendiente | condicion_saldado_conciliado
-            ).distinct()
-            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
-                fecha__year=year, fecha__month=month
-            )
-
+            filtro_fecha = Q(fecha__year=year, fecha__month=month)
         else: # Filtro por día
             fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            filtro_fecha = Q(fecha__date=fecha_dia)
 
-            condicion_pendiente = Q(estado='pendiente', fecha__date=fecha_dia)
-            
-            # --- SECCIÓN CORREGIDA ---
-            condicion_saldado_conciliado = Q(
-                estado__in=['saldado', 'Conciliado']
-            ) & (
-                Q(fecha__date=fecha_dia) | Q(fecha_consignacion=fecha_dia)
-            )
-            # --- FIN DE SECCIÓN ---
+        # 2. Aplicar el filtro de fecha a ambas consultas
+        # Solo nos interesan las consignaciones creadas en la fecha consultada,
+        # sin importar cuándo se pagaron.
+        consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+            filtro_fecha, 
+            estado__in=['pendiente', 'saldado', 'Conciliado']
+        ).distinct()
 
-            consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
-                condicion_pendiente | condicion_saldado_conciliado
-            ).distinct()
-            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(
-                fecha__date=fecha_dia
-            )
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_fecha)
         
+        # --- FIN DE LA CORRECCIÓN ---
+
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
             if sucursal_obj:
@@ -1307,6 +1289,9 @@ def resumen_corresponsal(request):
         else:
             titulo = 'Todas las sucursales'
 
+        # Pre-cargar usuarios para evitar múltiples consultas a la DB
+        usuarios_dict = {user.id: user.username for user in User.objects.all()}
+
         transacciones_data = []
         for t in consignaciones_qs.order_by('-id'):
             banco = getattr(t, 'banco', '')
@@ -1316,13 +1301,14 @@ def resumen_corresponsal(request):
                 if imei:
                     detalle_categoria = f"IMEI: {imei}"
 
-            responsable_id = getattr(t, 'responsable', None)
             responsable_username = 'Desconocido'
+            responsable_id = getattr(t, 'responsable', None)
             if responsable_id:
                 try:
+                    # El .get() ya maneja el caso de que la llave no exista
                     responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
                 except (ValueError, TypeError):
-                    pass
+                    pass # Si el ID no es un entero válido, se queda como 'Desconocido'
             
             nueva_transaccion = {
                 'id': t.id,
@@ -1342,9 +1328,11 @@ def resumen_corresponsal(request):
             }
             transacciones_data.append(nueva_transaccion)
         
+        # Los cálculos de totales se hacen sobre el queryset ya filtrado correctamente
         consignaciones_para_calculo = consignaciones_qs.exclude(
             Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
         )
+        
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
         total_saldado = consignaciones_para_calculo.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
         total_pendiente = consignaciones_para_calculo.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
@@ -1359,7 +1347,9 @@ def resumen_corresponsal(request):
         return Response(data)
 
     except Exception as e:
-        print(f"ERROR en resumen_corresponsal: {str(e)}")
+        # Es una buena práctica registrar el traceback completo para depuración
+        import traceback
+        print(f"ERROR en resumen_corresponsal: {str(e)}\n{traceback.format_exc()}")
         return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
     
 @api_view(['POST'])
