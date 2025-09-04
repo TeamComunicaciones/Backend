@@ -609,7 +609,6 @@ def buscar_precios(request):
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
         
-        # Lógica unificada para obtener la carga actual
         if carga_id_actual == 'todas':
             latest_price_ids_subquery = (
                 models.Lista_precio.objects
@@ -641,42 +640,30 @@ def buscar_precios(request):
         productos_lp_raw = precios_actuales_qs.values_list('producto', flat=True).distinct()
         producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
+        
         if not stoks_encontrados_lp:
             return Response({'data': [], 'fecha_actual': 'N/A'})
             
         precios_actuales_qs = precios_actuales_qs.filter(producto__in=stoks_encontrados_lp)
 
-        # --- INICIO DE LA OPTIMIZACIÓN (Reemplazo de N+1) ---
-
-        # 1. Definir una Subquery para encontrar el ID del precio anterior
         subquery_precio_anterior = models.Lista_precio.objects.filter(
             producto=OuterRef('producto'),
             nombre=OuterRef('nombre'),
-            carga__fecha_carga__lt=OuterRef('carga__fecha_carga') # Menor que la fecha de la fila actual
+            carga__fecha_carga__lt=OuterRef('carga__fecha_carga')
         ).order_by('-carga__fecha_carga').values('id')[:1]
 
-        # 2. Anotar el queryset principal con el ID encontrado
         precios_actuales_con_anterior = precios_actuales_qs.annotate(
             id_precio_anterior=Subquery(subquery_precio_anterior)
         )
 
-        # 3. Recopilar todos los IDs de precios anteriores que necesitamos buscar
         ids_anteriores_a_buscar = [p.id_precio_anterior for p in precios_actuales_con_anterior if p.id_precio_anterior is not None]
-
-        # 4. Realizar una ÚNICA consulta para obtener todos los objetos de precios anteriores
         precios_anteriores_encontrados = models.Lista_precio.objects.filter(id__in=ids_anteriores_a_buscar)
-
-        # 5. Crear un mapa para búsqueda rápida (ID -> objeto)
         mapa_precios_anteriores = {p.id: p for p in precios_anteriores_encontrados}
 
-        # --- FIN DE LA OPTIMIZACIÓN ---
-
-        # Cargar todos los kits, costos y descuentos sigue siendo una buena estrategia
         all_cargas_ids = models.Lista_precio.objects.filter(
             producto__in=stoks_encontrados_lp
         ).values_list('carga_id', flat=True).distinct()
 
-        # ... (el resto de la lógica para cargar kits, costos, descuentos no cambia)
         all_kits_data = models.Lista_precio.objects.filter(
             carga_id__in=all_cargas_ids,
             producto__in=stoks_encontrados_lp,
@@ -712,8 +699,8 @@ def buscar_precios(request):
             
         new_data = []
         base_iva_excluido = Decimal('1095578')
+        TASA_IVA = Decimal('0.19')
         
-        # Usamos el queryset anotado que ahora contiene 'id_precio_anterior'
         for precio_actual in precios_actuales_con_anterior:
             prod_raw = precio_actual.producto
             prod_lower = prod_raw.strip().lower()
@@ -724,14 +711,11 @@ def buscar_precios(request):
             kits_actuales = mapa_kits.get((prod_lower, carga_id), [])
             total_actual = calculate_dynamic_total(equipo_sin_iva_actual, kits_actuales)
 
-            # --- LÓGICA ANTERIOR REEMPLAZADA ---
-            # La vieja lógica con el caché y la consulta N+1 se reemplaza por una simple búsqueda en el mapa
             valor_anterior_bruto = None
             total_anterior = Decimal('0')
             kits_anteriores_to_send = []
             carga_id_anterior = None
             
-            # Búsqueda en el mapa (muy rápida)
             precio_anterior_obj = mapa_precios_anteriores.get(precio_actual.id_precio_anterior)
 
             if precio_anterior_obj:
@@ -742,7 +726,6 @@ def buscar_precios(request):
                 total_anterior = calculate_dynamic_total(Decimal(str(valor_anterior_bruto)), kits_anteriores)
                 kits_anteriores_to_send = kits_anteriores
             
-            # El resto del código para calcular la variación, IVA, etc., permanece igual
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
             if total_anterior > 0:
                 diferencial = total_actual - total_anterior
@@ -759,13 +742,29 @@ def buscar_precios(request):
             
             iva_equipo = Decimal('0')
             kits_data_to_send = [dict(k) for k in kits_actuales]
-            # ... (Lógica del IVA sin cambios) ...
+
+            if equipo_sin_iva_actual > base_iva_excluido:
+                iva_equipo = equipo_sin_iva_actual * TASA_IVA
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = 0.0
+                        break
+            else:
+                iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
+                kit_found = False
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = float(iva_as_kit_premium)
+                        kit_found = True
+                        break
+                if not kit_found:
+                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
 
             new_data.append({
                 'equipo': prod_raw,
                 'nombre_lista': nombre_lista,
                 'precio simcard': float(Decimal('2000')),
-                'IVA simcard': float(Decimal('2000') * Decimal('0.19')),
+                'IVA simcard': float(Decimal('2000') * TASA_IVA),
                 'equipo sin IVA': float(equipo_sin_iva_actual),
                 'IVA equipo': float(iva_equipo),
                 'kits': kits_data_to_send,
@@ -858,18 +857,6 @@ def settle_invoice(request):
 
         total_calculado = sum(c.valor for c in consignaciones_a_saldar)
 
-        # Se ha eliminado el bloque de validación
-        # if len(fecha_str) > 7:
-        #    fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
-        #    recaudo_del_dia = models.Transacciones_sucursal.objects.filter(
-        #        codigo_incocredito=sucursal_code,
-        #        fecha__date=fecha_dia
-        #    ).aggregate(total=Sum('valor'))['total'] or Decimal('0')  # CAMBIO AQUÍ
-        #
-        #    if total_calculado > recaudo_del_dia:
-        #        error_msg = f"El monto a saldar ({total_calculado:,.0f}) excede el recaudo del día ({recaudo_del_dia:,.0f}). No se puede procesar."
-        #        return Response({'detail': error_msg.replace(",",".")}, status=400)
-
         for consignacion in consignaciones_a_saldar:
             consignacion.estado = 'saldado'
             consignacion.save()
@@ -880,7 +867,7 @@ def settle_invoice(request):
             valor=total_calculado,
             banco='Corresponsal Banco de Bogota',
             fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
-            fecha=timezone.now(),  # <--- CAMBIO CLAVE: Usa siempre la fecha y hora actual
+            fecha=timezone.now(),
             responsable=str(usuario.id),
             estado='Conciliado',
             detalle=saldar_data['detalle'],
@@ -898,7 +885,6 @@ def settle_invoice(request):
     except Exception as e:
         print(f"ERROR en settle_invoice: {str(e)}")
         return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
-
 
 @api_view(['POST'])
 def assign_responsible(request):

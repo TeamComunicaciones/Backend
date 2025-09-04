@@ -133,7 +133,7 @@ class Corresponsal_consignacion(models.Model):
     detalle = models.TextField()
     url = models.URLField(blank=True, null=True)
     codigo_incocredito = models.CharField(max_length=100, null=True)
-    detalle_banco = models.CharField(max_length=100, null=True)
+    detalle_banco = models.TextField(null=True)
     min = models.CharField(max_length=20, blank=True, null=True)
     imei = models.CharField(max_length=30, blank=True, null=True)
     planilla = models.CharField(max_length=50, blank=True, null=True)
