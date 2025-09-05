@@ -65,7 +65,8 @@ urlpatterns = [
     path('buscar-precios/', views.buscar_precios, name='buscar_precios'),   
     path('get_reportes_por_fecha/', views.get_reportes_por_fecha, name='get-reportes-por-fecha'),
     path('translate-products-prepago/admin', views.delete_translate_product_admin),
-
+    path('sales-report/upload/', views.upload_sales_report, name='upload_sales_report'),
+    path('sales-report/dashboard/', views.get_sales_dashboard_data, name='get_sales_dashboard_data'),
 
 
 

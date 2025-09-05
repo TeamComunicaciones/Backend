@@ -67,6 +67,13 @@ from . import models
 from .models import ActaEntrega, ImagenLogin
 from .serializers import ActaEntregaSerializer, ImagenLoginSerializer
 
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.response import Response
+from rest_framework import status
+from .models import ReporteDetalleVenta
+from .services import process_sales_report_file
+
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
@@ -709,7 +716,38 @@ def buscar_precios(request):
             
             equipo_sin_iva_actual = precio_actual.valor
             kits_actuales = mapa_kits.get((prod_lower, carga_id), [])
-            total_actual = calculate_dynamic_total(equipo_sin_iva_actual, kits_actuales)
+            
+            # --- LÓGICA DE IVA Y TOTAL CORREGIDA ---
+            
+            # 1. Copiar los kits para poder modificarlos de forma segura
+            kits_data_to_send = [dict(k) for k in kits_actuales]
+            iva_equipo = Decimal('0')
+
+            # 2. Aplicar las reglas de negocio del IVA a la lista de kits
+            if equipo_sin_iva_actual > base_iva_excluido:
+                iva_equipo = equipo_sin_iva_actual * TASA_IVA
+                # Determinar dinámicamente el kit que representa el IVA (ej: "Precio sub" -> "Kit sub")
+                kit_iva_nombre = "kit " + nombre_lista.replace("Precio ", "").lower()
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == kit_iva_nombre:
+                        kit['valor'] = 0.0  # Anular el valor del kit porque el IVA se mostrará por separado
+                        break
+            else:
+                # Si está por debajo del umbral, el IVA se representa como "Kit Premium"
+                iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
+                kit_found = False
+                for kit in kits_data_to_send:
+                    if kit.get('nombre', '').lower() == 'kit premium':
+                        kit['valor'] = float(iva_as_kit_premium)
+                        kit_found = True
+                        break
+                if not kit_found:
+                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
+
+            # 3. Calcular el total USANDO la lista de kits ya modificada
+            total_actual = equipo_sin_iva_actual + sum(Decimal(str(k.get('valor', '0'))) for k in kits_data_to_send)
+            
+            # --- FIN DE LA CORRECCIÓN ---
 
             valor_anterior_bruto = None
             total_anterior = Decimal('0')
@@ -721,9 +759,10 @@ def buscar_precios(request):
             if precio_anterior_obj:
                 carga_id_anterior = precio_anterior_obj.carga_id
                 valor_anterior_bruto = precio_anterior_obj.valor
-                
                 kits_anteriores = mapa_kits.get((prod_lower, carga_id_anterior), [])
-                total_anterior = calculate_dynamic_total(Decimal(str(valor_anterior_bruto)), kits_anteriores)
+                
+                # También se debe aplicar la lógica al precio anterior para un cálculo de variación correcto
+                total_anterior = Decimal(str(valor_anterior_bruto)) + sum(Decimal(str(k.get('valor', '0'))) for k in kits_anteriores)
                 kits_anteriores_to_send = kits_anteriores
             
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
@@ -740,26 +779,6 @@ def buscar_precios(request):
             if filtro_promo and not es_promo:
                 continue
             
-            iva_equipo = Decimal('0')
-            kits_data_to_send = [dict(k) for k in kits_actuales]
-
-            if equipo_sin_iva_actual > base_iva_excluido:
-                iva_equipo = equipo_sin_iva_actual * TASA_IVA
-                for kit in kits_data_to_send:
-                    if kit.get('nombre', '').lower() == 'kit premium':
-                        kit['valor'] = 0.0
-                        break
-            else:
-                iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
-                kit_found = False
-                for kit in kits_data_to_send:
-                    if kit.get('nombre', '').lower() == 'kit premium':
-                        kit['valor'] = float(iva_as_kit_premium)
-                        kit_found = True
-                        break
-                if not kit_found:
-                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
-
             new_data.append({
                 'equipo': prod_raw,
                 'nombre_lista': nombre_lista,
@@ -767,13 +786,13 @@ def buscar_precios(request):
                 'IVA simcard': float(Decimal('2000') * TASA_IVA),
                 'equipo sin IVA': float(equipo_sin_iva_actual),
                 'IVA equipo': float(iva_equipo),
-                'kits': kits_data_to_send,
+                'kits': kits_data_to_send, # Enviar la lista de kits modificada y correcta
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
                 'costo': float(mapa_costos.get((prod_lower, carga_id), Decimal('0'))),
                 'descuento': float(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))),
-                'total_kit_calculado': float(total_actual),
+                'total_kit_calculado': float(total_actual), # Enviar el total corregido
                 'Promo': es_promo,
                 'valor_anterior': float(valor_anterior_bruto) if valor_anterior_bruto is not None else 0,
                 'costo_anterior': float(mapa_costos.get((prod_lower, carga_id_anterior), Decimal('0'))) if carga_id_anterior else 0.0,
@@ -1249,19 +1268,13 @@ def resumen_corresponsal(request):
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
-        # --- LÓGICA DE FILTRADO CORREGIDA Y SIMPLIFICADA ---
-        
-        # 1. Definir el filtro de fecha principal
-        if len(fecha_str) == 7: # Filtro por mes
+        if len(fecha_str) == 7:
             year, month = map(int, fecha_str.split('-'))
             filtro_fecha = Q(fecha__year=year, fecha__month=month)
-        else: # Filtro por día
+        else:
             fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
             filtro_fecha = Q(fecha__date=fecha_dia)
 
-        # 2. Aplicar el filtro de fecha a ambas consultas
-        # Solo nos interesan las consignaciones creadas en la fecha consultada,
-        # sin importar cuándo se pagaron.
         consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
             filtro_fecha, 
             estado__in=['pendiente', 'saldado', 'Conciliado']
@@ -1269,8 +1282,6 @@ def resumen_corresponsal(request):
 
         transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_fecha)
         
-        # --- FIN DE LA CORRECCIÓN ---
-
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
             if sucursal_obj:
@@ -1282,11 +1293,19 @@ def resumen_corresponsal(request):
         else:
             titulo = 'Todas las sucursales'
 
-        # Pre-cargar usuarios para evitar múltiples consultas a la DB
-        usuarios_dict = {user.id: user.username for user in User.objects.all()}
+        responsable_ids = consignaciones_qs.values_list('responsable', flat=True).distinct()
+        valid_responsable_ids = [int(id) for id in responsable_ids if id and str(id).isdigit()]
+        usuarios_dict = {
+            user.id: user.username 
+            for user in User.objects.filter(id__in=valid_responsable_ids)
+        }
+        
+        consignaciones_para_calculo = consignaciones_qs.exclude(
+            Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
+        )
 
         transacciones_data = []
-        for t in consignaciones_qs.order_by('-id'):
+        for t in consignaciones_para_calculo.order_by('-id'):
             banco = getattr(t, 'banco', '')
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
             if banco == 'Venta doble proposito':
@@ -1298,10 +1317,9 @@ def resumen_corresponsal(request):
             responsable_id = getattr(t, 'responsable', None)
             if responsable_id:
                 try:
-                    # El .get() ya maneja el caso de que la llave no exista
                     responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
                 except (ValueError, TypeError):
-                    pass # Si el ID no es un entero válido, se queda como 'Desconocido'
+                    pass
             
             nueva_transaccion = {
                 'id': t.id,
@@ -1321,11 +1339,6 @@ def resumen_corresponsal(request):
             }
             transacciones_data.append(nueva_transaccion)
         
-        # Los cálculos de totales se hacen sobre el queryset ya filtrado correctamente
-        consignaciones_para_calculo = consignaciones_qs.exclude(
-            Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
-        )
-        
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
         total_saldado = consignaciones_para_calculo.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
         total_pendiente = consignaciones_para_calculo.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
@@ -1340,8 +1353,6 @@ def resumen_corresponsal(request):
         return Response(data)
 
     except Exception as e:
-        # Es una buena práctica registrar el traceback completo para depuración
-        import traceback
         print(f"ERROR en resumen_corresponsal: {str(e)}\n{traceback.format_exc()}")
         return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
     
@@ -2862,6 +2873,100 @@ def calcular_variacion(row):
         percentage = (dif / valor_anterior) * 100 if valor_anterior > 0 else 0
         return {'indicador': 'down', 'diferencial': dif, 'porcentaje': round(percentage, 2)}
 # views.py 
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+# @permission_classes([IsAuthenticated]) # Deberías proteger esta vista
+def upload_sales_report(request):
+    """
+    Recibe un archivo excel en 'report_file' y lo procesa.
+    """
+    report_file = request.FILES.get('report_file')
+    if not report_file:
+        return Response({'detail': 'No se proporcionó ningún archivo.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not report_file.name.endswith(('.xlsx', '.xls')):
+        return Response({'detail': 'Formato de archivo no válido. Se requiere .xlsx o .xls.'}, status=status.HTTP_400_BAD_REQUEST)
+        
+    try:
+        result = process_sales_report_file(report_file)
+        if result['status'] == 'error':
+            return Response({'detail': result['message']}, status=status.HTTP_400_BAD_REQUEST)
+        
+        return Response({
+            'detail': 'Archivo procesado correctamente.',
+            'nuevos_registros': result['creados'],
+            'registros_omitidos_por_duplicado': result['existentes']
+        }, status=status.HTTP_201_CREATED)
+
+    except Exception as e:
+        return Response({'detail': f'Ocurrió un error interno inesperado: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# --- VISTA PARA OBTENER DATOS DEL DASHBOARD ---
+@api_view(['GET'])
+# @permission_classes([IsAuthenticated]) # También proteger esta
+def get_sales_dashboard_data(request):
+    """
+    Devuelve datos agregados para el dashboard, con filtros opcionales.
+    Filtros posibles: fecha_inicio, fecha_fin, sucursal, clasificacion_venta
+    """
+    queryset = ReporteDetalleVenta.objects.all()
+
+    # Aplicar filtros desde los query params
+    fecha_inicio = request.query_params.get('fecha_inicio')
+    fecha_fin = request.query_params.get('fecha_fin')
+    sucursal = request.query_params.get('sucursal')
+    clasificacion = request.query_params.get('clasificacion_venta')
+
+    if fecha_inicio:
+        queryset = queryset.filter(fecha__gte=fecha_inicio)
+    if fecha_fin:
+        queryset = queryset.filter(fecha__lte=fecha_fin)
+    if sucursal:
+        queryset = queryset.filter(sucursal__iexact=sucursal)
+    if clasificacion:
+        queryset = queryset.filter(clasificacion_venta__iexact=clasificacion)
+
+    try:
+        # Realizar agregaciones en la base de datos
+        summary = queryset.aggregate(
+            total_ventas=Count('id'),
+            total_costo=Sum('costo_equipo'),
+            total_incentivos=Sum('incentivo')
+        )
+        
+        # Agrupar por clasificación para un gráfico
+        ventas_por_clasificacion = list(
+            queryset.values('clasificacion_venta')
+                    .annotate(cantidad=Count('id'))
+                    .order_by('-cantidad')
+        )
+
+        # Agrupar por sucursal para otro gráfico
+        ventas_por_sucursal = list(
+            queryset.values('sucursal')
+                    .annotate(cantidad=Count('id'))
+                    .order_by('-cantidad')[:10] # Top 10 sucursales
+        )
+        
+        # Obtener listas de filtros para los dropdowns del frontend
+        opciones_filtros = {
+            'sucursales': sorted(list(ReporteDetalleVenta.objects.values_list('sucursal', flat=True).distinct())),
+            'clasificaciones': sorted(list(ReporteDetalleVenta.objects.values_list('clasificacion_venta', flat=True).distinct()))
+        }
+
+        data = {
+            'summary': summary,
+            'ventas_por_clasificacion': ventas_por_clasificacion,
+            'ventas_por_sucursal': ventas_por_sucursal,
+            'opciones_filtros': opciones_filtros
+        }
+
+        return Response(data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response({'detail': f'Error al consultar los datos: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # En tu archivo views.py
 @api_view(['GET', 'POST'])
