@@ -717,38 +717,39 @@ def buscar_precios(request):
             equipo_sin_iva_actual = precio_actual.valor
             kits_actuales = mapa_kits.get((prod_lower, carga_id), [])
             
-            # --- LÓGICA DE IVA Y TOTAL CORREGIDA ---
-            
-            # 1. Copiar los kits para poder modificarlos de forma segura
             kits_data_to_send = [dict(k) for k in kits_actuales]
             iva_equipo = Decimal('0')
 
-            # 2. Aplicar las reglas de negocio del IVA a la lista de kits
             if equipo_sin_iva_actual > base_iva_excluido:
                 iva_equipo = equipo_sin_iva_actual * TASA_IVA
-                # Determinar dinámicamente el kit que representa el IVA (ej: "Precio sub" -> "Kit sub")
                 kit_iva_nombre = "kit " + nombre_lista.replace("Precio ", "").lower()
                 for kit in kits_data_to_send:
                     if kit.get('nombre', '').lower() == kit_iva_nombre:
-                        kit['valor'] = 0.0  # Anular el valor del kit porque el IVA se mostrará por separado
+                        kit['valor'] = 0.0
                         break
             else:
-                # Si está por debajo del umbral, el IVA se representa como "Kit Premium"
-                iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
-                kit_found = False
-                for kit in kits_data_to_send:
-                    if kit.get('nombre', '').lower() == 'kit premium':
-                        kit['valor'] = float(iva_as_kit_premium)
-                        kit_found = True
-                        break
-                if not kit_found:
-                    kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
+                # --- NUEVA LÓGICA ---
+                # Si está por debajo del umbral, la regla depende de la lista de precios
+                if nombre_lista.lower() == 'precio premium':
+                    # REGLA ESPECIAL: Para "premium", el Kit Premium es 0 si está bajo el umbral.
+                    for kit in kits_data_to_send:
+                        if kit.get('nombre', '').lower() == 'kit premium':
+                            kit['valor'] = 0.0
+                            break
+                else:
+                    # REGLA GENERAL: Para las demás listas (ej: "sub"), el IVA se representa en el Kit Premium.
+                    iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
+                    kit_found = False
+                    for kit in kits_data_to_send:
+                        if kit.get('nombre', '').lower() == 'kit premium':
+                            kit['valor'] = float(iva_as_kit_premium)
+                            kit_found = True
+                            break
+                    if not kit_found:
+                        kits_data_to_send.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
 
-            # 3. Calcular el total USANDO la lista de kits ya modificada
             total_actual = equipo_sin_iva_actual + sum(Decimal(str(k.get('valor', '0'))) for k in kits_data_to_send)
             
-            # --- FIN DE LA CORRECCIÓN ---
-
             valor_anterior_bruto = None
             total_anterior = Decimal('0')
             kits_anteriores_to_send = []
@@ -760,8 +761,6 @@ def buscar_precios(request):
                 carga_id_anterior = precio_anterior_obj.carga_id
                 valor_anterior_bruto = precio_anterior_obj.valor
                 kits_anteriores = mapa_kits.get((prod_lower, carga_id_anterior), [])
-                
-                # También se debe aplicar la lógica al precio anterior para un cálculo de variación correcto
                 total_anterior = Decimal(str(valor_anterior_bruto)) + sum(Decimal(str(k.get('valor', '0'))) for k in kits_anteriores)
                 kits_anteriores_to_send = kits_anteriores
             
@@ -786,13 +785,13 @@ def buscar_precios(request):
                 'IVA simcard': float(Decimal('2000') * TASA_IVA),
                 'equipo sin IVA': float(equipo_sin_iva_actual),
                 'IVA equipo': float(iva_equipo),
-                'kits': kits_data_to_send, # Enviar la lista de kits modificada y correcta
+                'kits': kits_data_to_send,
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
                 'porcentaje': variacion['porcentaje'],
                 'costo': float(mapa_costos.get((prod_lower, carga_id), Decimal('0'))),
                 'descuento': float(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))),
-                'total_kit_calculado': float(total_actual), # Enviar el total corregido
+                'total_kit_calculado': float(total_actual),
                 'Promo': es_promo,
                 'valor_anterior': float(valor_anterior_bruto) if valor_anterior_bruto is not None else 0,
                 'costo_anterior': float(mapa_costos.get((prod_lower, carga_id_anterior), Decimal('0'))) if carga_id_anterior else 0.0,
