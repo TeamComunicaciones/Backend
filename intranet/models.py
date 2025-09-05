@@ -143,6 +143,43 @@ class Lista_negra(models.Model):
     def __str__(self) -> str:
         return self.equipo
     
+class ReporteDetalleVenta(models.Model):
+    # --- Campos directos del Excel ---
+    fecha = models.DateField(help_text="Fecha de la venta")
+    imei = models.CharField(max_length=50, unique=True, help_text="IMEI único del equipo")
+    modelo_equipo = models.CharField(max_length=255)
+    sucursal = models.CharField(max_length=100)
+    tipo_producto = models.CharField(max_length=100, null=True, blank=True)
+    tipo_venta_original = models.CharField(max_length=100, help_text="El 'Tipo de venta' original del Excel")
+    asesor = models.CharField(max_length=150, null=True, blank=True)
+    canal = models.CharField(max_length=100, null=True, blank=True)
+    tiket_venta = models.CharField(max_length=100, null=True, blank=True)
+    costo_equipo = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    incentivo = models.DecimalField(max_digits=12, decimal_places=2, default=0.0)
+    
+    # --- Campos enriquecidos por nuestra lógica ---
+    clasificacion_venta = models.CharField(
+        max_length=50, 
+        help_text="Categoría calculada (Sell In, Sell Out, Inventario)"
+    )
+    tipo_vendedor = models.CharField(
+        max_length=50, 
+        null=True, 
+        blank=True, 
+        help_text="Categoría adicional para Sell Out (UP, Freelance, etc.)"
+    )
+    
+    # --- Metadatos ---
+    fecha_carga = models.DateTimeField(auto_now_add=True, help_text="Fecha y hora en que se cargó el registro")
+    
+    class Meta:
+        verbose_name = "Detalle de Venta para Reporte"
+        verbose_name_plural = "Detalles de Venta para Reportes"
+        ordering = ['-fecha']
+
+    def __str__(self):
+        return f"{self.modelo_equipo} ({self.imei}) - {self.fecha}"
+    
 from django.db import models
 from django.contrib.auth.models import User
 
