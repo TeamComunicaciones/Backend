@@ -854,17 +854,13 @@ def settle_invoice(request):
         consignacion_ids = request.data.get('ids', [])
         saldar_data = request.data.get('saldar_data', {})
         jwt_token = request.data.get('jwt')
-        sucursal_code = request.data.get('sucursal')
-        fecha_str = request.data.get('fecha')
-
-        if not all([consignacion_ids, saldar_data, jwt_token, sucursal_code, fecha_str]):
+        
+        if not all([consignacion_ids, saldar_data, jwt_token]):
             return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
 
         payload = jwt.decode(jwt_token, 'secret', algorithms=['HS256'])
         usuario = User.objects.get(username=payload['id'])
         
-        sucursal_obj = models.Codigo_oficina.objects.get(codigo=sucursal_code)
-
         consignaciones_a_saldar = models.Corresponsal_consignacion.objects.filter(
             id__in=consignacion_ids, 
             estado='pendiente'
@@ -873,33 +869,36 @@ def settle_invoice(request):
         if len(consignaciones_a_saldar) != len(consignacion_ids):
             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
 
-        total_calculado = sum(c.valor for c in consignaciones_a_saldar)
+        consignaciones_por_sucursal = defaultdict(list)
+        for c in consignaciones_a_saldar:
+            if c.codigo_incocredito:
+                consignaciones_por_sucursal[c.codigo_incocredito].append(c)
 
-        for consignacion in consignaciones_a_saldar:
-            consignacion.estado = 'saldado'
-            consignacion.save()
+        for sucursal_obj, consignaciones_grupo in consignaciones_por_sucursal.items():
+            
+            total_grupo = sum(c.valor for c in consignaciones_grupo)
+            ids_grupo = [c.id for c in consignaciones_grupo]
+            referencias_text = ','.join(map(str, ids_grupo))
 
-        referencias_text = ','.join(map(str, consignacion_ids))
+            models.Corresponsal_consignacion.objects.create(
+                valor=total_grupo,
+                banco='Corresponsal Banco de Bogota',
+                fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
+                fecha=timezone.now(),
+                responsable=str(usuario.id),
+                estado='Conciliado',
+                detalle=saldar_data['detalle'],
+                url='',
+                codigo_incocredito=sucursal_obj,
+                detalle_banco=referencias_text,
+            )
 
-        models.Corresponsal_consignacion.objects.create(
-            valor=total_calculado,
-            banco='Corresponsal Banco de Bogota',
-            fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
-            fecha=timezone.now(),
-            responsable=str(usuario.id),
-            estado='Conciliado',
-            detalle=saldar_data['detalle'],
-            url='',
-            codigo_incocredito=sucursal_obj.terminal,
-            detalle_banco=referencias_text,
-        )
+        consignaciones_a_saldar.update(estado='saldado')
 
         return Response({'detail': 'Consignaciones saldadas correctamente.'}, status=200)
 
     except User.DoesNotExist:
         return Response({'detail': 'El usuario del token no es válido.'}, status=401)
-    except models.Codigo_oficina.DoesNotExist:
-        return Response({'detail': 'La sucursal especificada no existe.'}, status=404)
     except Exception as e:
         print(f"ERROR en settle_invoice: {str(e)}")
         return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
