@@ -869,13 +869,11 @@ def settle_invoice(request):
         if len(consignaciones_a_saldar) != len(consignacion_ids):
             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
 
-        # --- INICIO DE LOS CAMBIOS ---
-        # 1. Obtenemos la fecha (timestamp) más reciente de los registros a saldar.
+        # Obtenemos los datos para el nuevo registro 'Conciliado'
         fecha_cierre_conciliado = consignaciones_a_saldar.aggregate(max_fecha=Max('fecha'))['max_fecha']
-        # 2. Capturamos el detalle común.
         detalle_comun = saldar_data['detalle']
-        # --- FIN DE LOS CAMBIOS ---
-        
+        fecha_consignacion_conciliado = datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date()
+
         consignaciones_por_sucursal = defaultdict(list)
         for c in consignaciones_a_saldar:
             if c.codigo_incocredito:
@@ -886,11 +884,12 @@ def settle_invoice(request):
             ids_grupo = [c.id for c in consignaciones_grupo]
             referencias_text = ','.join(map(str, ids_grupo))
 
+            # Creamos el registro 'Conciliado' con la fecha de la operación (septiembre)
             models.Corresponsal_consignacion.objects.create(
                 valor=total_grupo,
                 banco='Corresponsal Banco de Bogota',
-                fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
-                fecha=fecha_cierre_conciliado, # <-- Usamos la fecha MÁS RECIENTE del grupo
+                fecha_consignacion=fecha_consignacion_conciliado,
+                fecha=fecha_cierre_conciliado,
                 responsable=str(usuario.id),
                 estado='Conciliado',
                 detalle=detalle_comun,
@@ -899,12 +898,13 @@ def settle_invoice(request):
                 detalle_banco=referencias_text,
             )
 
-        # Actualizamos los registros a 'saldado', PERO SOLO el estado y el detalle.
-        # Las fechas originales se conservan.
+        # ======================= INICIO DEL CAMBIO =======================
+        # Actualizamos los registros a 'saldado' SIN modificar sus fechas originales.
         consignaciones_a_saldar.update(
             estado='saldado',
             detalle=detalle_comun
         )
+        # ======================== FIN DEL CAMBIO =========================
 
         return Response({'detail': 'Consignaciones saldadas correctamente.'}, status=200)
 
