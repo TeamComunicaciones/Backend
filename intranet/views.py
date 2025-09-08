@@ -1257,28 +1257,34 @@ def encargados_corresponsal(request):
 
 
 
+# Reemplaza tu función en views.py con esta
 @api_view(['POST'])
 def resumen_corresponsal(request):
     try:
         fecha_str = request.data.get('fecha')
         sucursal_code = request.data.get('sucursal')
 
+        # ... (toda la lógica de filtrado de fecha y sucursal sigue igual) ...
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
         if len(fecha_str) == 7:
             year, month = map(int, fecha_str.split('-'))
-            filtro_fecha = Q(fecha__year=year, fecha__month=month)
+            filtro_principal = Q(fecha_consignacion__year=year, fecha_consignacion__month=month)
+            filtro_cajero = Q(fecha__year=year, fecha__month=month) 
         else:
             fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            filtro_fecha = Q(fecha__date=fecha_dia)
+            filtro_principal = Q(fecha_consignacion=fecha_dia)
+            fecha_inicio = timezone.make_aware(datetime.datetime.combine(fecha_dia, datetime.time.min))
+            fecha_fin = timezone.make_aware(datetime.datetime.combine(fecha_dia, datetime.time.max))
+            filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
 
         consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
-            filtro_fecha, 
+            filtro_principal,
             estado__in=['pendiente', 'saldado', 'Conciliado']
         ).distinct()
-
-        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_fecha)
+        
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero)
         
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
@@ -1291,6 +1297,12 @@ def resumen_corresponsal(request):
         else:
             titulo = 'Todas las sucursales'
 
+
+        # Queryset para la VISTA y los CÁLCULOS (excluye 'Conciliado')
+        consignaciones_para_vista = consignaciones_qs.exclude(
+            Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
+        )
+
         responsable_ids = consignaciones_qs.values_list('responsable', flat=True).distinct()
         valid_responsable_ids = [int(id) for id in responsable_ids if id and str(id).isdigit()]
         usuarios_dict = {
@@ -1298,12 +1310,10 @@ def resumen_corresponsal(request):
             for user in User.objects.filter(id__in=valid_responsable_ids)
         }
         
-        consignaciones_para_calculo = consignaciones_qs.exclude(
-            Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
-        )
-
-        transacciones_data = []
-        for t in consignaciones_para_calculo.order_by('-id'):
+        # --- 1. PREPARAMOS LA LISTA PARA LA VISTA ---
+        transacciones_data_vista = []
+        for t in consignaciones_para_vista.order_by('-id'): # Usamos la lista FILTRADA
+            # ... (copia aquí todo el bloque para construir 'nueva_transaccion')
             banco = getattr(t, 'banco', '')
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
             if banco == 'Venta doble proposito':
@@ -1319,38 +1329,48 @@ def resumen_corresponsal(request):
                 except (ValueError, TypeError):
                     pass
             
-            nueva_transaccion = {
-                'id': t.id,
-                'valor': getattr(t, 'valor', 0) or 0,
-                'banco': banco,
-                'fecha_consignacion': t.fecha_consignacion,
-                'fecha': t.fecha,
-                'responsable': responsable_username,
-                'estado': getattr(t, 'estado', ''),
-                'detalle': getattr(t, 'detalle', '') or '',
-                'sucursal_nombre': getattr(t, 'codigo_incocredito', ''),
-                'detalle_categoria': detalle_categoria,
-                'url': getattr(t, 'url', None),
-                'min': getattr(t, 'min', None),
-                'imei': getattr(t, 'imei', None),
-                'planilla': getattr(t, 'planilla', None)
-            }
-            transacciones_data.append(nueva_transaccion)
-        
+            nueva_transaccion = { 'id': t.id, 'valor': getattr(t, 'valor', 0) or 0, 'banco': banco, 'fecha_consignacion': t.fecha_consignacion, 'fecha': t.fecha, 'responsable': responsable_username, 'estado': getattr(t, 'estado', ''), 'detalle': getattr(t, 'detalle', '') or '', 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''), 'detalle_categoria': detalle_categoria, 'url': getattr(t, 'url', None), 'min': getattr(t, 'min', None), 'imei': getattr(t, 'imei', None), 'planilla': getattr(t, 'planilla', None) }
+            transacciones_data_vista.append(nueva_transaccion)
+
+        # --- 2. PREPARAMOS LA LISTA PARA EL EXCEL ---
+        transacciones_data_excel = []
+        for t in consignaciones_qs.order_by('-id'): # Usamos la lista COMPLETA
+            # ... (copia aquí todo el bloque para construir 'nueva_transaccion')
+            banco = getattr(t, 'banco', '')
+            detalle_categoria = getattr(t, 'detalle_banco', '') or ''
+            if banco == 'Venta doble proposito':
+                imei = getattr(t, 'imei', '') or ''
+                if imei:
+                    detalle_categoria = f"IMEI: {imei}"
+
+            responsable_username = 'Desconocido'
+            responsable_id = getattr(t, 'responsable', None)
+            if responsable_id:
+                try:
+                    responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
+                except (ValueError, TypeError):
+                    pass
+            
+            nueva_transaccion = { 'id': t.id, 'valor': getattr(t, 'valor', 0) or 0, 'banco': banco, 'fecha_consignacion': t.fecha_consignacion, 'fecha': t.fecha, 'responsable': responsable_username, 'estado': getattr(t, 'estado', ''), 'detalle': getattr(t, 'detalle', '') or '', 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''), 'detalle_categoria': detalle_categoria, 'url': getattr(t, 'url', None), 'min': getattr(t, 'min', None), 'imei': getattr(t, 'imei', None), 'planilla': getattr(t, 'planilla', None) }
+            transacciones_data_excel.append(nueva_transaccion)
+
+        # Los cálculos siguen usando la lista filtrada ('consignaciones_para_vista')
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
-        total_saldado = consignaciones_para_calculo.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
-        total_pendiente = consignaciones_para_calculo.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
+        total_saldado = consignaciones_para_vista.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
+        total_pendiente = consignaciones_para_vista.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
         
         data = {
             'valor': valor_total_cajero,
             'titulo': titulo,
             'consignacion': total_saldado,
             'pendiente': total_pendiente,
-            'consignaciones': transacciones_data
+            'consignaciones': transacciones_data_vista,      # <-- Lista para la VISTA
+            'consignaciones_excel': transacciones_data_excel # <-- NUEVA lista para el EXCEL
         }
         return Response(data)
 
     except Exception as e:
+        import traceback
         print(f"ERROR en resumen_corresponsal: {str(e)}\n{traceback.format_exc()}")
         return Response({'error': f'Error interno del servidor: {str(e)}'}, status=500)
     
