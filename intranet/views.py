@@ -869,13 +869,19 @@ def settle_invoice(request):
         if len(consignaciones_a_saldar) != len(consignacion_ids):
             return Response({'detail': 'Algunas consignaciones no se encontraron o ya fueron saldadas.'}, status=400)
 
+        # --- INICIO DE LOS CAMBIOS ---
+        # 1. Obtenemos la fecha (timestamp) más reciente de los registros a saldar.
+        fecha_cierre_conciliado = consignaciones_a_saldar.aggregate(max_fecha=Max('fecha'))['max_fecha']
+        # 2. Capturamos el detalle común.
+        detalle_comun = saldar_data['detalle']
+        # --- FIN DE LOS CAMBIOS ---
+        
         consignaciones_por_sucursal = defaultdict(list)
         for c in consignaciones_a_saldar:
             if c.codigo_incocredito:
                 consignaciones_por_sucursal[c.codigo_incocredito].append(c)
 
         for sucursal_obj, consignaciones_grupo in consignaciones_por_sucursal.items():
-            
             total_grupo = sum(c.valor for c in consignaciones_grupo)
             ids_grupo = [c.id for c in consignaciones_grupo]
             referencias_text = ','.join(map(str, ids_grupo))
@@ -884,16 +890,21 @@ def settle_invoice(request):
                 valor=total_grupo,
                 banco='Corresponsal Banco de Bogota',
                 fecha_consignacion=datetime.datetime.strptime(saldar_data['fechaConsignacion'], '%Y-%m-%d').date(),
-                fecha=timezone.now(),
+                fecha=fecha_cierre_conciliado, # <-- Usamos la fecha MÁS RECIENTE del grupo
                 responsable=str(usuario.id),
                 estado='Conciliado',
-                detalle=saldar_data['detalle'],
+                detalle=detalle_comun,
                 url='',
                 codigo_incocredito=sucursal_obj,
                 detalle_banco=referencias_text,
             )
 
-        consignaciones_a_saldar.update(estado='saldado')
+        # Actualizamos los registros a 'saldado', PERO SOLO el estado y el detalle.
+        # Las fechas originales se conservan.
+        consignaciones_a_saldar.update(
+            estado='saldado',
+            detalle=detalle_comun
+        )
 
         return Response({'detail': 'Consignaciones saldadas correctamente.'}, status=200)
 
