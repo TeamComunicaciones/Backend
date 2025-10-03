@@ -7,12 +7,29 @@ import json
 import locale
 import os
 import random
+from functools import wraps
+from django.db.models.functions import TruncMonth 
+from dateutil.relativedelta import relativedelta
+from rest_framework.permissions import IsAdminUser
+from django.db.models import Sum, Count, Q, Case, When, DecimalField, Value
+from datetime import date
+from datetime import datetime
+from django.db.models.functions import Coalesce
+from django.contrib.postgres.aggregates import ArrayAgg
+from datetime import datetime, timedelta, date, time
+from django.conf import settings
 import shutil
 import string
 import traceback
 from django.db.models import Subquery, OuterRef, Q, Max, F
 from django.db.models import Sum
-
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import CustomTokenObtainPairSerializer, UserDataSerializer
+from django.contrib.auth.models import User
+from django.conf import settings
+from rest_framework.pagination import PageNumberPagination
+from .serializers import ComisionSerializer
+import calendar
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -28,6 +45,9 @@ from rest_framework.decorators import api_view, parser_classes # <-- LÍNEA CORR
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from django.db.models.functions import Lag
+from .tasks import procesar_archivo_comisiones # <-- Importa la nueva tarea
+from django.core.files.storage import FileSystemStorage
+from .models import Comision
 
 # 2. Librerías de Terceros
 import jwt
@@ -55,6 +75,7 @@ from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from .models import Permisos_usuarios
 
 import re
 import ast
@@ -75,7 +96,815 @@ from .models import ReporteDetalleVenta
 from .services import process_sales_report_file
 
 
+def asesor_permission_required(view_func):
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        try:
+            auth_header = request.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Bearer '):
+                raise AuthenticationFailed('Token no proporcionado o con formato incorrecto.')
+            
+            token = auth_header.split(' ')[1]
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+            
+            # --- LÍNEA CORREGIDA ---
+            # 1. Obtenemos el ID del token
+            user_id = payload.get('id')
+            if not user_id:
+                raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
+
+            # 2. Buscamos al usuario por su ID numérico
+            user = User.objects.get(id=user_id)
+            
+            # Asignamos el usuario encontrado a la petición para que las vistas lo puedan usar
+            request.user = user
+            
+            # Verificamos que el usuario tenga el permiso específico de "asesor"
+            if not Permisos_usuarios.objects.filter(user=user, permiso__permiso='asesor_comisiones', tiene_permiso=True).exists():
+                raise AuthenticationFailed('No tienes los permisos de Asesor necesarios para acceder a este recurso.')
+            
+            # Si todo está bien, ejecutamos la vista original
+            return view_func(request, *args, **kwargs)
+
+        # Capturamos todos los posibles errores de autenticación/permisos
+        except (jwt.InvalidTokenError, jwt.ExpiredSignatureError, AuthenticationFailed, User.DoesNotExist) as e:
+            # Devolvemos una respuesta de error clara
+            return Response({'detail': str(e)}, status=403)
+        except Exception as e:
+            # Captura para cualquier otro error inesperado
+            return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
+            
+    return wrapper
+
+def get_sort_key(item):
+    value = item.get('mes_pago') or item.get('mes_liquidacion')
+    
+    # Si no hay fecha, lo mandamos al final dándole la fecha más antigua posible
+    if not value:
+        return date.min
+    
+    # Si la fecha es un string (del serializador), la convertimos a un objeto date
+    if isinstance(value, str):
+        # Usamos split('T') por si es un datetime string como '2025-09-29T00:00:00'
+        return date.fromisoformat(value.split('T')[0])
+    
+    # Si ya es un objeto date, lo retornamos tal cual
+    return value
+
+# --- VISTA 1: OBTENER TODOS LOS USUARIOS CON SU RUTA ---
+# Este es el equivalente a tu `encargados_corresponsal`. Carga los datos iniciales.
+@api_view(['GET'])
+def usuarios_con_ruta_view(request):
+    """
+    Devuelve una lista de todos los usuarios del sistema, cada uno con su
+    ID, username, email y la ruta que tiene asignada desde su Perfil.
+    Crea un perfil para cualquier usuario que no lo tenga.
+    """
+    # Bucle para asegurar que cada usuario tenga un perfil asociado.
+    # Es una buena práctica para evitar errores si se crean usuarios por fuera de esta lógica.
+    for user in User.objects.filter(perfil__isnull=True):
+        models.Perfil.objects.create(user=user)
+
+    # Obtenemos todos los usuarios y su perfil relacionado para optimizar la consulta.
+    usuarios = User.objects.select_related('perfil').all().order_by('username')
+    
+    # Construimos la lista de datos en el formato exacto que espera el frontend.
+    data = [
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "ruta_asignada": user.perfil.ruta_asignada
+        }
+        for user in usuarios
+    ]
+    return Response(data, status=status.HTTP_200_OK)
+
+
+# --- VISTA 2: OBTENER LA LISTA ÚNICA DE RUTAS ---
+# Este endpoint alimenta el selector desplegable en cada tarjeta de usuario.
+@api_view(['GET'])
+def lista_rutas_view(request):
+    """
+    Devuelve una lista única y ordenada de todas las rutas existentes 
+    en la tabla de Comisiones para usar en los selectores.
+    """
+    try:
+        rutas = models.Comision.objects.values_list('ruta', flat=True).distinct().order_by('ruta')
+        # Nos aseguramos de no incluir rutas vacías o nulas
+        rutas_validas = [ruta for ruta in rutas if ruta]
+        return Response(rutas_validas, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# --- VISTA 3: ASIGNAR O QUITAR RUTA A UN USUARIO ---
+# Este es el equivalente a tu `assign-responsible`. Se ejecuta cada vez que se cambia un selector.
+@api_view(['POST'])
+def asignar_ruta_view(request):
+    """
+    Asigna una ruta al Perfil de un usuario. Si la ruta es null, 
+    se le quita el rol de asesor.
+    """
+    user_id = request.data.get('user_id')
+    ruta = request.data.get('ruta')
+
+    if not user_id:
+        return Response({"error": "El 'user_id' es requerido."}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        user_a_modificar = User.objects.get(pk=user_id)
+        
+        # Usamos get_or_create para asegurar que el perfil exista.
+        perfil, created = models.Perfil.objects.get_or_create(user=user_a_modificar)
+        
+        perfil.ruta_asignada = ruta
+        perfil.save()
+        
+        mensaje = f"Ruta '{ruta}' asignada a {user_a_modificar.username}." if ruta else f"Se quitó la ruta y el rol de asesor a {user_a_modificar.username}."
+        
+        return Response({"mensaje": mensaje}, status=status.HTTP_200_OK)
+
+    except User.DoesNotExist:
+        return Response({"error": "El usuario especificado no existe."}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": f"Ocurrió un error inesperado: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
+
+@api_view(['GET'])
+def filtros_asesor_view(request):
+    """
+    Devuelve los filtros para el dashboard del asesor.
+    Automáticamente filtra por la ruta asignada al usuario.
+    """
+    try:
+        # 1. Obtener la ruta asignada al usuario logueado desde su perfil
+        ruta_asesor = request.user.perfil.ruta_asignada
+        
+        # 2. Si el asesor no tiene una ruta asignada en su perfil, no puede ver el dashboard.
+        if not ruta_asesor:
+            return Response(
+                {"error": "No tienes una ruta asignada para ver este reporte."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
+        # 3. Obtener los puntos de venta ÚNICAMENTE de esa ruta
+        puntos_de_venta = models.Comision.objects.filter(ruta=ruta_asesor).values(
+            'idpos', 'punto_de_venta'
+        ).distinct().order_by('punto_de_venta')
+
+        # 4. Devolver un objeto que solo contiene los puntos de venta.
+        data = {
+            'puntos_de_venta': list(puntos_de_venta)
+        }
+        return Response(data)
+
+    except models.Perfil.DoesNotExist:
+         return Response(
+            {"error": "Tu usuario no tiene un perfil de permisos configurado."}, 
+            status=status.HTTP_403_FORBIDDEN
+         )
+
+# --- DECORADOR DE PERMISOS (LO MANTENEMOS POR SEGURIDAD) ---
+@api_view(['POST'])
+@asesor_permission_required  # <--- 1. APLICA EL DECORADOR
+def select_datos_corresponsal_cajero(request):
+    try:
+        # 2. YA NO NECESITAS EL TOKEN, el decorador se encargó de eso.
+        #    El usuario autenticado ahora está disponible en 'request.user'.
+        fecha_str = request.data['fecha']
+        user = request.user  # Obtenemos el usuario directamente de la request
+
+        responsable = models.Responsable_corresponsal.objects.filter(user=user).first()
+        if not responsable or not responsable.sucursal:
+            return Response({'error': 'Usuario no asignado a una sucursal válida.'}, status=404)
+        
+        sucursal_terminal = responsable.sucursal.terminal
+
+        sucursal_obj = models.Codigo_oficina.objects.filter(terminal=sucursal_terminal).first()
+        if not sucursal_obj:
+            return Response({'error': f'El código para la sucursal {sucursal_terminal} no fue encontrado.'}, status=404)
+        
+        codigo_sucursal = sucursal_obj.codigo
+        
+        # El resto de tu lógica de fechas y filtros permanece igual.
+        if len(fecha_str) == 7:
+            # Para un mes completo (YYYY-MM)
+            fecha_inicio_naive = datetime.strptime(fecha_str, '%Y-%m')
+            fecha_fin_naive = (fecha_inicio_naive + pd.offsets.MonthEnd(1)).to_pydatetime()
+        else:
+            # Para un día específico (YYYY-MM-DD)
+            fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            fecha_inicio_naive = datetime.combine(fecha_dia, time.min)
+            fecha_fin_naive = datetime.combine(fecha_dia, time.max)
+
+        fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+        fecha_fin = timezone.make_aware(fecha_fin_naive)
+        
+        transacciones_qs = models.Transacciones_sucursal.objects.filter(
+            fecha__range=(fecha_inicio, fecha_fin), 
+            codigo_incocredito=codigo_sucursal
+        )
+        
+        total_datos = transacciones_qs.aggregate(total=Sum('valor'))['total'] or 0
+
+        return Response({'total': total_datos, 'sucursal': sucursal_terminal})
+
+    # 3. YA NO NECESITAS 'except User.DoesNotExist', el decorador lo maneja.
+    except Exception as e:
+        print(f"Error en select_datos_corresponsal_cajero: {str(e)}")
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+    
+class CustomTokenObtainPairView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        
+        if response.status_code == 200:
+            email = request.data.get('email')
+            if email:
+                try:
+                    user = User.objects.get(email=email)
+                    user_data = UserDataSerializer(user).data
+                    response.data['user'] = user_data
+                except User.DoesNotExist:
+                    pass
+        
+        return response
+    
+@api_view(['GET'])
+def consulta_pdv_view(request):
+    """
+    Busca comisiones por IDPOS y filtros.
+    DEVUELVE LAS COMISIONES 'Pagada' AGRUPADAS POR DÍA Y ASESOR.
+    """
+    idpos_filtro = request.query_params.get('idpos', None)
+    
+    if not idpos_filtro:
+        return Response({
+            "totals": {"total_ventas": 0, "total_comisionado": 0},
+            "results": []
+        })
+
+    # 1. Aplicar todos los filtros iniciales
+    queryset = models.Comision.objects.filter(idpos=idpos_filtro)
+    
+    fecha_inicio_str = request.query_params.get('fecha_inicio', None)
+    fecha_fin_str = request.query_params.get('fecha_fin', None)
+    estado_filtro = request.query_params.get('estado', None)
+
+    if fecha_inicio_str and fecha_fin_str:
+        try:
+            queryset = queryset.filter(mes_pago__range=[fecha_inicio_str, fecha_fin_str])
+        except ValueError:
+            # Ignora fechas inválidas
+            pass
+
+    if estado_filtro and estado_filtro != 'Todos':
+        queryset = queryset.filter(estado=estado_filtro)
+
+    # 2. Calcular los totales sobre el queryset ya filtrado
+    totals = queryset.aggregate(
+        total_ventas=Count('id'),
+        total_comisionado=Sum('comision_final')
+    )
+
+    # 3. Lógica para agrupar las comisiones pagadas
+    pagadas_agrupadas = queryset.filter(
+        estado='Pagada'
+    ).values(
+        'mes_pago', 'asesor_identificador', 'mes_liquidacion'
+    ).annotate(
+        cantidad=Count('id'),
+        valor_total=Sum('comision_final')
+    ).order_by('-mes_pago')
+
+    # 4. Obtener las demás comisiones (no pagadas)
+    otras_comisiones_qs = queryset.exclude(estado='Pagada')
+    
+    # 5. Unificar y dar formato a los resultados
+    resultados = []
+    
+    # Añadir filas agrupadas
+    for item in pagadas_agrupadas:
+        resultados.append({
+            'id': f"agrupado-{item['mes_pago'].isoformat()}-{item['asesor_identificador']}",
+            'agrupado': True,
+            'mes_liquidacion': item['mes_liquidacion'],
+            'mes_pago': item['mes_pago'],
+            # Este campo ahora contiene el resumen
+            'asesor_identificador': f"{item['cantidad']} ventas de {item['asesor_identificador']}",
+            'comision_final': item['valor_total'],
+            'estado': 'Pagada',
+        })
+
+    # Añadir filas individuales
+    for comision in otras_comisiones_qs:
+        resultados.append({
+            'id': comision.id,
+            'agrupado': False,
+            'mes_liquidacion': comision.mes_liquidacion,
+            'mes_pago': comision.mes_pago,
+            'asesor_identificador': comision.asesor_identificador,
+            'comision_final': comision.comision_final,
+            'estado': comision.estado,
+        })
+    
+    # 6. Ordenar la lista combinada por fecha de pago
+    resultados.sort(key=lambda x: x['mes_pago'] if x['mes_pago'] else date.min, reverse=True)
+
+    # 7. Construir la respuesta final
+    # (No se usa paginación para mantener la simplicidad del frontend actual)
+    return Response({
+        "totals": {
+            'total_ventas': totals.get('total_ventas') or 0,
+            'total_comisionado': totals.get('total_comisionado') or 0
+        },
+        "results": resultados
+    })
+    
+# intranet/views.py
+
+# Asegúrate de tener estos imports al principio de tu archivo
+from django.utils import timezone
+from dateutil.relativedelta import relativedelta
+from django.db.models import Sum, Q
+# ... y los demás imports que ya usas
+
+@api_view(['GET'])
+@asesor_permission_required
+def reporte_comparativa_view(request):
+    """
+    Genera datos para el gráfico comparativo.
+    Ahora maneja correctamente el caso donde no hay comisiones pagadas.
+    """
+    try:
+        ruta_asesor = request.user.perfil.ruta_asignada
+        if not ruta_asesor:
+            return Response({"error": "No tienes una ruta asignada."}, status=status.HTTP_403_FORBIDDEN)
+        
+        base_queryset = models.Comision.objects.filter(ruta__iexact=ruta_asesor)
+        
+        pdv_seleccionados = request.query_params.getlist('pdv', [])
+        if not pdv_seleccionados:
+            return Response([])
+
+        # --- LÓGICA DE FECHA CORREGIDA Y ROBUSTA ---
+        ultimo_mes_obj = None
+        # Primero, verificamos si existe alguna comisión con mes_pago antes de buscar la última
+        if base_queryset.filter(mes_pago__isnull=False).exists():
+            ultimo_mes_obj = base_queryset.filter(mes_pago__isnull=False).latest('mes_pago')
+
+        if ultimo_mes_obj:
+            # Si se encontró, usamos ese mes como referencia
+            ultimo_mes = ultimo_mes_obj.mes_pago.replace(day=1)
+        else:
+            # Si no, usamos el mes actual como referencia para evitar errores
+            ultimo_mes = timezone.now().date().replace(day=1)
+        
+        mes_anterior = (ultimo_mes - relativedelta(months=1))
+        # --- FIN DE LA CORRECCIÓN ---
+        
+        condicion_mes_actual = Q(mes_pago__year=ultimo_mes.year, mes_pago__month=ultimo_mes.month)
+        condicion_mes_anterior = Q(mes_pago__year=mes_anterior.year, mes_pago__month=mes_anterior.month)
+
+        resultados = []
+        
+        if 'TOTAL RUTA' in pdv_seleccionados:
+            total_ruta = base_queryset.aggregate(
+                total_mes_actual=Sum('comision_final', filter=condicion_mes_actual, default=0),
+                total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0)
+            )
+            resultados.append({
+                'punto_de_venta': 'TOTAL RUTA',
+                'total_mes_actual': total_ruta['total_mes_actual'],
+                'total_mes_anterior': total_ruta['total_mes_anterior']
+            })
+            pdv_seleccionados.remove('TOTAL RUTA')
+
+        if pdv_seleccionados:
+            pdv_detalles = base_queryset.filter(
+                punto_de_venta__in=pdv_seleccionados
+            ).values('punto_de_venta').annotate(
+                total_mes_actual=Sum('comision_final', filter=condicion_mes_actual, default=0),
+                total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0)
+            ).order_by('punto_de_venta')
+            
+            resultados.extend(list(pdv_detalles))
+
+        return Response(resultados)
+
+    except models.Perfil.DoesNotExist:
+        return Response([])
+    
+# intranet/views.py
+
+@api_view(['POST'])
+@asesor_permission_required
+def pagar_comisiones_view(request):
+    comision_ids = request.data.get('comision_ids', [])
+    metodos_pago = request.data.get('metodos_pago', {})
+
+    if not comision_ids or not metodos_pago:
+        return Response({"error": "Faltan datos para procesar el pago."}, status=status.HTTP_400_BAD_REQUEST)
+
+    with transaction.atomic():
+        comisiones_a_pagar = models.Comision.objects.filter(pk__in=comision_ids, estado__in=['Pendiente', 'Acumulada'])
+        
+        if not comisiones_a_pagar.exists():
+            return Response({"error": "No se encontraron comisiones válidas para pagar."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ... (el resto de las validaciones iniciales no cambian)
+        idpos_unicos = comisiones_a_pagar.values_list('idpos', flat=True).distinct()
+        if idpos_unicos.count() > 1:
+            return Response({"error": "No se pueden pagar comisiones de diferentes Puntos de Venta a la vez."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        idpos_del_pago = idpos_unicos.first()
+        punto_de_venta_del_pago = comisiones_a_pagar.first().punto_de_venta
+        monto_comisiones = comisiones_a_pagar.aggregate(total=Sum('comision_final'))['total'] or 0
+        monto_total_pagado = sum(valor for valor in metodos_pago.values() if isinstance(valor, (int, float)))
+        
+        pago = models.PagoComision.objects.create(
+            idpos=idpos_del_pago,
+            punto_de_venta=punto_de_venta_del_pago,
+            creado_por=request.user,
+            monto_total_pagado=monto_total_pagado,
+            monto_comisiones=monto_comisiones,
+            metodos_pago=metodos_pago
+        )
+
+        restante = monto_comisiones - monto_total_pagado
+        primera_comision = comisiones_a_pagar.first()
+
+        # CASO 1: Pago parcial (sea de 1 o de un grupo)
+        if 0 < monto_total_pagado < monto_comisiones:
+            # A. Creamos la nueva comisión 'Pagada' con el monto pagado.
+            models.Comision.objects.create(
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=primera_comision.mes_pago,
+                comision_final=monto_total_pagado,
+                estado='Pagada',
+                producto=f"PAGO PARCIAL #{pago.id}",
+                iccid=f"PAGO-{pago.id}",
+                pagos=pago
+            )
+
+            # B. Creamos la nueva comisión 'Acumulada' con el saldo restante.
+            models.Comision.objects.create(
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=primera_comision.mes_pago,
+                comision_final=restante,
+                estado='Acumulada',
+                producto=f"SALDO PAGO #{pago.id}",
+                iccid=f"SALDO-{pago.id}",
+                pagos=pago
+            )
+
+            # C. "Cerramos" las comisiones originales para que no se vuelvan a mostrar.
+            comisiones_a_pagar.update(estado='Consolidada', pagos=pago)
+
+        # CASO 2: Pago completo o sobrepago
+        else:
+            comisiones_a_pagar.update(estado='Pagada', pagos=pago)
+            # Si hay un restante (por sobrepago), creamos un ajuste.
+            if restante != 0:
+                models.Comision.objects.create(
+                    idpos=primera_comision.idpos,
+                    punto_de_venta=primera_comision.punto_de_venta,
+                    asesor=primera_comision.asesor,
+                    asesor_identificador=primera_comision.asesor_identificador,
+                    ruta=primera_comision.ruta,
+                    estado='Acumulada',
+                    comision_final=restante, # Será negativo, representando un crédito/saldo a favor
+                    mes_pago=timezone.now().date(),
+                    producto=f"AJUSTE POR SOBRANTE PAGO #{pago.id}",
+                    iccid=f"AJUSTE-{pago.id}",
+                    pagos=pago
+                )
+            
+    return Response({"mensaje": "Pago procesado con éxito."}, status=status.HTTP_200_OK)
+
+@api_view(['GET'])
+# @permission_classes([IsAuthenticated]) # Asegúrate de proteger la vista
+def consulta_agrupada_pdv_view(request):
+    """
+    Devuelve las comisiones agrupadas para un IDPOS específico,
+    con filtros opcionales por mes y estado.
+    """
+    idpos = request.query_params.get('idpos')
+    if not idpos:
+        return Response({"error": "El parámetro 'idpos' es obligatorio."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Construir el queryset base
+    base_queryset = models.Comision.objects.filter(idpos=idpos).exclude(estado='Consolidada')
+    
+    # Aplicar filtros opcionales
+    mes_filtro = request.query_params.get('mes')
+    if mes_filtro:
+        try:
+            fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
+            base_queryset = base_queryset.filter(
+                mes_pago__year=fecha_obj.year, 
+                mes_pago__month=fecha_obj.month
+            )
+        except (ValueError, TypeError):
+            pass
+
+    estado_filtro = request.query_params.get('estado')
+    if estado_filtro:
+        base_queryset = base_queryset.filter(estado=estado_filtro)
+
+    # Calcular KPIs sobre el queryset filtrado
+    kpis_data = base_queryset.aggregate(
+        totalPagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
+        totalPendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+    )
+    kpis_data['totalComisiones'] = (kpis_data.get('totalPagado') or 0) + (kpis_data.get('totalPendiente') or 0)
+
+    # Agrupar resultados para la tabla
+    grouped_results = base_queryset.values(
+        'mes_pago', 'asesor_identificador', 'producto', 'estado'
+    ).annotate(
+        comision_final_total=Sum('comision_final')
+    ).order_by('-mes_pago', 'asesor_identificador')
+
+    # Formatear la salida
+    resultados = []
+    for item in grouped_results:
+        unique_id = f"agrupado-{item['estado']}-{item['mes_pago']}-{item['asesor_identificador']}-{item['producto']}"
+        resultados.append({
+            'id': unique_id,
+            'asesor_identificador': item['asesor_identificador'],
+            'producto': item['producto'],
+            'comision_final': item['comision_final_total'],
+            'estado': item['estado'],
+            'mes_pago': item['mes_pago'],
+        })
+
+    data = {
+        'kpis': kpis_data,
+        'results': resultados
+    }
+    
+    return Response(data)
+
+
+@api_view(['GET'])
+@asesor_permission_required
+def reporte_general_view(request):
+    """
+    Genera un reporte general de comisiones con filtros dinámicos para el dashboard de administración.
+    """
+    # 1. Leer los parámetros de la URL
+    fecha_inicio_str = request.query_params.get('fecha_inicio')
+    fecha_fin_str = request.query_params.get('fecha_fin')
+    rutas_filter = request.query_params.getlist('rutas')
+    estados_filter = request.query_params.getlist('estados')
+
+    # 2. Construir el queryset base
+    # Excluimos 'Consolidada' como acordamos, para no duplicar datos.
+    base_queryset = models.Comision.objects.exclude(estado='Consolidada')
+
+    # 3. Aplicar filtros dinámicamente
+    if fecha_inicio_str and fecha_fin_str:
+        try:
+            fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
+            fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
+            base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
+        except (ValueError, TypeError):
+            pass # Ignora fechas inválidas
+
+    if rutas_filter:
+        base_queryset = base_queryset.filter(ruta__in=rutas_filter)
+
+    if estados_filter:
+        base_queryset = base_queryset.filter(estado__in=estados_filter)
+
+    # 4. Calcular los KPIs
+    kpis_data = base_queryset.aggregate(
+        pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
+        pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+    )
+    total_comisiones = (kpis_data.get('pagado') or 0) + (kpis_data.get('pendiente') or 0)
+
+    # 5. Preparar datos para las gráficas
+    
+    # Gráfica 1: Evolución Mensual (Barras)
+    evolucion_mensual = base_queryset \
+        .annotate(month=TruncMonth('mes_pago')) \
+        .values('month') \
+        .annotate(
+            pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
+            pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+        ) \
+        .order_by('month')
+
+    evolucion_chart_data = [
+        {
+            "mes": item['month'].strftime('%Y-%m') if item['month'] else 'Sin Fecha',
+            "pagado": item['pagado'],
+            "pendiente": item['pendiente']
+        } for item in evolucion_mensual
+    ]
+    
+    # Gráfica 2: Distribución por Estado (Dona)
+    distribucion_estado = base_queryset \
+        .values('estado') \
+        .annotate(total=Sum('comision_final')) \
+        .order_by('estado')
+    
+    # Gráfica 3: Picos Mensuales (Línea)
+    picos_mensuales_chart_data = [
+        {
+            "mes": item['mes'],
+            "total": (item['pagado'] or 0) + (item['pendiente'] or 0)
+        } for item in evolucion_chart_data
+    ]
+
+    # 6. Construir la respuesta final
+    data = {
+        "kpis": {
+            "total": total_comisiones,
+            "pagado": kpis_data.get('pagado') or 0,
+            "pendiente": kpis_data.get('pendiente') or 0
+        },
+        "charts": {
+            "evolucion_mensual": evolucion_chart_data,
+            "distribucion_estado": list(distribucion_estado),
+            "picos_mensuales": picos_mensuales_chart_data
+        }
+    }
+    
+    return Response(data)
+
+@api_view(['GET'])
+@asesor_permission_required
+def reporte_asesor_view(request):
+    """
+    Genera el reporte para el asesor. Acepta un filtro por mes (YYYY-MM) y PDV.
+    Devuelve TODAS las comisiones (Pagada, Pendiente, Acumulada) que coincidan
+    con los filtros, con el detalle agrupado.
+    """
+    try:
+        # 1. Asegura que el usuario tenga un perfil y obtiene su ruta
+        perfil, created = models.Perfil.objects.get_or_create(user=request.user)
+        ruta_asesor = perfil.ruta_asignada
+        if not ruta_asesor:
+            return Response({"error": "No tienes una ruta asignada en tu perfil."}, status=status.HTTP_403_FORBIDDEN)
+        
+        # 2. Crea el queryset base filtrado por la ruta del asesor
+        base_queryset = models.Comision.objects.filter(ruta__iexact=ruta_asesor).exclude(estado='Consolidada')
+
+        # 3. Aplica los filtros de la interfaz de usuario (AHORA SOBRE EL BASE_QUERYSET)
+        idpos_filtro = request.query_params.get('idpos', None)
+        mes_filtro = request.query_params.get('mes', None)
+        
+        # ESTA LÍNEA SE ELIMINA:
+        # queryset_filtrado = base_queryset.filter(estado__in=['Pendiente', 'Acumulada'])
+        
+        # El queryset principal ahora contendrá TODOS los estados
+        queryset_con_filtros = base_queryset 
+
+        if mes_filtro:
+            try:
+                fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
+                queryset_con_filtros = queryset_con_filtros.filter(
+                    mes_pago__year=fecha_obj.year, 
+                    mes_pago__month=fecha_obj.month
+                )
+            except (ValueError, TypeError):
+                pass
+        
+        if idpos_filtro and idpos_filtro != 'todos':
+            queryset_con_filtros = queryset_con_filtros.filter(idpos=idpos_filtro)
+
+        # 4. Agrupa los resultados para la tabla de detalle (usando el queryset completo)
+        grouped_results = queryset_con_filtros.values(
+            'mes_pago', 
+            'asesor_identificador', 
+            'producto',
+            'estado'
+        ).annotate(
+            cantidad=Count('id'),
+            comision_final_total=Sum('comision_final'),
+            individual_ids=Coalesce(ArrayAgg('id'), Value([]))
+        ).order_by('-mes_pago', 'asesor_identificador')
+
+        # El resto del código para paginar sigue igual
+        resultados = []
+        for item in grouped_results:
+            if item['cantidad'] == 0:
+                continue
+            unique_id = f"agrupado-{item['estado']}-{item['mes_pago']}-{item['asesor_identificador']}-{item['producto']}"
+            resultados.append({
+                'id': unique_id,
+                'agrupado': True,
+                'asesor_identificador': item['asesor_identificador'],
+                'iccid': f"{item['cantidad']} ventas",
+                'producto': item['producto'],
+                'comision_final': item['comision_final_total'],
+                'estado': item['estado'],
+                'mes_pago': item['mes_pago'],
+                'individual_ids': item['individual_ids']
+            })
+
+        paginator = PageNumberPagination()
+        paginator.page_size = 20
+        paginated_results = paginator.paginate_queryset(resultados, request)
+        detalle_final = paginator.get_paginated_response(paginated_results).data
+
+        # 5. Cálculo de KPIs y datos para gráficos (usando el queryset completo)
+        # ESTO AHORA FUNCIONARÁ CORRECTAMENTE
+        kpis = queryset_con_filtros.aggregate(
+            total_pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
+            total_pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+        )
+
+        # Calculamos el total sumando los otros dos KPIs
+        total_comisiones = (kpis.get('total_pagado') or 0) + (kpis.get('total_pendiente') or 0)
+
+        
+        distribucion_estado = queryset_con_filtros.values('estado').annotate(count=Count('id')).order_by('estado')
+
+        # 6. Respuesta Final
+        data = {
+            'kpis': { 
+                'totalPagado': kpis.get('total_pagado') or 0, 
+                'totalPendiente': kpis.get('total_pendiente') or 0, 
+                'totalComisiones': total_comisiones, # <-- NUEVO CAMPO
+            },
+            'detalle': detalle_final,
+            'chart_data': {
+                'distribucion_estado': list(distribucion_estado),
+            }
+        }
+        return Response(data)
+
+    except models.Perfil.DoesNotExist:
+        return Response({"error": "Tu usuario no tiene un perfil de permisos configurado."}, status=status.HTTP_403_FORBIDDEN)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({"error": f"Ha ocurrido un error inesperado: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['GET'])
+@asesor_permission_required
+def filtros_reporte_view(request):
+    """
+    Devuelve los filtros para el dashboard del asesor.
+    Automáticamente filtra por la ruta asignada al usuario.
+    """
+    try:
+        # 1. Obtener la ruta asignada al usuario logueado desde su perfil
+        ruta_asesor = request.user.perfil.ruta_asignada
+        
+        # 2. Si el asesor no tiene una ruta asignada en su perfil, no puede ver el dashboard.
+        if not ruta_asesor:
+            return Response(
+                {"error": "No tienes una ruta asignada para ver este reporte."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+            
+        # 3. Obtener los puntos de venta ÚNICAMENTE de esa ruta
+        puntos_de_venta = models.Comision.objects.filter(ruta=ruta_asesor).values(
+            'idpos', 'punto_de_venta'
+        ).distinct().order_by('punto_de_venta')
+
+        # 4. Devolver un objeto que solo contiene los puntos de venta.
+        data = {
+            'puntos_de_venta': list(puntos_de_venta)
+        }
+        return Response(data)
+
+    except models.Perfil.DoesNotExist:
+         return Response(
+            {"error": "Tu usuario no tiene un perfil de permisos configurado."}, 
+            status=status.HTTP_403_FORBIDDEN
+         )
+
+@api_view(['GET'])
+@asesor_permission_required
+def pdv_por_ruta_view(request):
+    """Devuelve los puntos de venta que existen para una ruta específica."""
+    ruta_seleccionada = request.query_params.get('ruta', None)
+    queryset = Comision.objects.values('idpos', 'punto_de_venta').distinct()
+    if ruta_seleccionada and ruta_seleccionada != 'todas':
+        queryset = queryset.filter(ruta=ruta_seleccionada)
+    puntos_de_venta = queryset.order_by('punto_de_venta')
+    return Response(list(puntos_de_venta))
+
+
+
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 def formulas_prices(request, id=None):
@@ -166,6 +995,45 @@ def formulas_prices(request, id=None):
     except Exception as e:
         return Response({'error': e}, status=400)
     
+    
+# tu_app/views.py
+
+@api_view(['POST'])
+@asesor_permission_required
+@parser_classes([MultiPartParser, FormParser])
+def carga_comisiones_view(request):
+    
+    # 2. Hacemos la validación de permisos de negocio de forma más limpia
+    #    usando el `request.user` que DRF ya nos dio.
+    if not models.Permisos_usuarios.objects.filter(
+        user=request.user, 
+        permiso__permiso='admin_comisiones', 
+        tiene_permiso=True
+    ).exists():
+        return Response(
+            {'error': 'No tienes permiso para realizar esta acción.'}, 
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # 3. La lógica de carga del archivo se mantiene igual
+    archivo_excel = request.FILES.get('file')
+    if not archivo_excel:
+        return Response({'error': 'No se proporcionó archivo'}, status=status.HTTP_400_BAD_REQUEST)
+
+    fs = FileSystemStorage(location='tmp/')
+    if not os.path.exists('tmp/'):
+        os.makedirs('tmp/')
+    filename = fs.save(archivo_excel.name, archivo_excel)
+    file_path = os.path.join(os.getcwd(), 'tmp', filename)
+
+    # 4. Llamamos a la tarea con el ID del usuario ya verificado
+    procesar_archivo_comisiones.delay(file_path, request.user.id)
+
+    return Response(
+        {'mensaje': 'El archivo ha sido recibido y se está procesando en segundo plano.'}, 
+        status=status.HTTP_202_ACCEPTED
+    )
+
 @swagger_auto_schema(
     method='get',
     manual_parameters=[
@@ -408,7 +1276,7 @@ def get_filtros_precios(request):
             return Response({'detail': 'Token no proporcionado.'}, status=401)
         
         token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         usuario = User.objects.get(username=payload.get('id'))
 
         permisos_por_usuario = {
@@ -825,7 +1693,7 @@ def black_list(request, id=None):
             return Response({"error": "El campo 'product' es obligatorio."}, status=400)
             
         try:
-            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             usuario = User.objects.get(username=payload['id'])
         except jwt.ExpiredSignatureError:
             raise AuthenticationFailed('Debes estar logueado')
@@ -1008,23 +1876,35 @@ def get_image_corresponsal(request):
     pass
 
 @api_view(['POST'])
+@asesor_permission_required # <-- AÑADIDO: Se protege la vista
 def select_consignaciones_corresponsal_cajero(request):
     try:
         fecha_str = request.data['fecha']
-        sucursal = request.data['sucursal']
+        user = request.user # <-- AÑADIDO: Obtenemos el usuario del token
 
-        if len(fecha_str) == 7:
+        # AÑADIDO: Se obtiene la sucursal de forma segura desde el usuario
+        responsable = models.Responsable_corresponsal.objects.filter(user=user).first()
+        if not responsable or not responsable.sucursal:
+            return Response({'error': 'Usuario no asignado a una sucursal válida.'}, status=404)
+        sucursal = responsable.sucursal.terminal
+
+        # --- LÓGICA DE FECHA CORREGIDA ---
+        if len(fecha_str) == 7: # Mes completo
             fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
             fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
-        else:
-            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
-            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+        else: # Día específico
+            fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            fecha_inicio_naive = datetime.combine(fecha_dia, time.min)
+            fecha_fin_naive = datetime.combine(fecha_dia, time.max)
+        # --- FIN DE LA CORRECCIÓN ---
 
         fecha_inicio = timezone.make_aware(fecha_inicio_naive)
         fecha_fin = timezone.make_aware(fecha_fin_naive)
 
+        # La consulta ahora usa la sucursal obtenida de forma segura
         transacciones_base = models.Corresponsal_consignacion.objects.filter(
-            fecha__range=(fecha_inicio, fecha_fin),
+            # OJO: Se cambió a fecha_consignacion para que coincida con el reporte principal
+            fecha_consignacion__range=(fecha_inicio.date(), fecha_fin.date()),
             codigo_incocredito=sucursal
         )
         
@@ -1039,19 +1919,18 @@ def select_consignaciones_corresponsal_cajero(request):
         return Response({'total': total_real, 'detalles': detalles})
 
     except Exception as e:
-        print(f"Error en select_consignaciones_corresponsal_cajero: {str(e)}")
+        import traceback
+        print(f"Error en select_consignaciones_corresponsal_cajero: {e}\n{traceback.format_exc()}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
 
+
+
+
 @api_view(['GET'])
+@asesor_permission_required
 def historico_pendientes_cajero(request):
     try:
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return Response({'detail': 'Token no proporcionado.'}, status=401)
-            
-        token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-        usuario = User.objects.get(username=payload['id'])
+        usuario = request.user
 
         responsable = models.Responsable_corresponsal.objects.filter(user=usuario).first()
         if not responsable or not responsable.sucursal:
@@ -1063,16 +1942,17 @@ def historico_pendientes_cajero(request):
             return Response({'error': 'Código de sucursal no encontrado.'}, status=404)
 
         hoy = timezone.now().date()
-        inicio_rango = hoy - datetime.timedelta(days=45)
+        # --- CORRECCIÓN 2: Usa timedelta directamente ---
+        inicio_rango = hoy - timedelta(days=45)
 
         transacciones_diarias = models.Transacciones_sucursal.objects.filter(
             codigo_incocredito=sucursal_obj.codigo,
-            fecha__range=(inicio_rango, hoy)
+            fecha__date__range=(inicio_rango, hoy)
         ).annotate(dia=TruncDay('fecha')).values('dia').annotate(total_cajero=Sum('valor')).order_by('dia')
         
         consignaciones_base = models.Corresponsal_consignacion.objects.filter(
             codigo_incocredito=sucursal_terminal,
-            fecha__range=(inicio_rango, hoy)
+            fecha__date__range=(inicio_rango, hoy)
         ).exclude(Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, '']))
 
         consignaciones_diarias = consignaciones_base.annotate(
@@ -1084,8 +1964,8 @@ def historico_pendientes_cajero(request):
         df_transacciones = pd.DataFrame(list(transacciones_diarias))
         df_consignaciones = pd.DataFrame(list(consignaciones_diarias))
 
-        if 'dia' in df_transacciones: df_transacciones['dia'] = pd.to_datetime(df_transacciones['dia']).dt.date
-        if 'dia' in df_consignaciones: df_consignaciones['dia'] = pd.to_datetime(df_consignaciones['dia']).dt.date
+        if 'dia' in df_transacciones.columns: df_transacciones['dia'] = pd.to_datetime(df_transacciones['dia']).dt.date
+        if 'dia' in df_consignaciones.columns: df_consignaciones['dia'] = pd.to_datetime(df_consignaciones['dia']).dt.date
 
         if df_transacciones.empty and df_consignaciones.empty:
             return Response({'total_general': 0, 'detalles': []})
@@ -1114,12 +1994,9 @@ def historico_pendientes_cajero(request):
             'detalles': detalles_pendientes
         })
 
-    except jwt.ExpiredSignatureError:
-        return Response({'detail': 'Token ha expirado.'}, status=401)
-    except User.DoesNotExist:
-        return Response({'detail': 'Usuario del token no es válido.'}, status=401)
     except Exception as e:
-        print(f"Error en historico_pendientes_cajero: {str(e)}")
+        import traceback
+        print(f"Error en historico_pendientes_cajero: {e}\n{traceback.format_exc()}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
     
 def generate_unique_filename(original_name):
@@ -1145,7 +2022,7 @@ def consignacion_corresponsal(request):
         consignacion_data = json.loads(consignacion_str)
         fecha_reporte = datetime.datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         usuario = User.objects.get(username=payload['id'])
 
         # --- Lógica para subir a SharePoint (sin cambios) ---
@@ -1268,63 +2145,74 @@ def encargados_corresponsal(request):
 
 
 
-# Reemplaza tu función en views.py con esta
 @api_view(['POST'])
 def resumen_corresponsal(request):
     try:
         fecha_str = request.data.get('fecha')
         sucursal_code = request.data.get('sucursal')
 
-        # ... (toda la lógica de filtrado de fecha y sucursal sigue igual) ...
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
+        # PASO 1: Filtrar las CONSIGNACIONES por la fecha de consignación (esto no cambia)
+        filtro_principal = None
         if len(fecha_str) == 7:
             year, month = map(int, fecha_str.split('-'))
             filtro_principal = Q(fecha_consignacion__year=year, fecha_consignacion__month=month)
-            filtro_cajero = Q(fecha__year=year, fecha__month=month) 
         else:
-            fecha_dia = datetime.datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
             filtro_principal = Q(fecha_consignacion=fecha_dia)
-            fecha_inicio = timezone.make_aware(datetime.datetime.combine(fecha_dia, datetime.time.min))
-            fecha_fin = timezone.make_aware(datetime.datetime.combine(fecha_dia, datetime.time.max))
-            filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
 
         consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
             filtro_principal,
             estado__in=['pendiente', 'saldado', 'Conciliado']
         ).distinct()
-        
-        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero)
-        
+
+        # Filtro de sucursal (esto no cambia)
+        titulo = ''
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
             if sucursal_obj:
                 consignaciones_qs = consignaciones_qs.filter(codigo_incocredito=sucursal_obj.terminal)
-                transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
                 titulo = sucursal_obj.terminal
             else:
                 titulo = 'Sucursal Desconocida'
         else:
             titulo = 'Todas las sucursales'
 
-
-        # Queryset para la VISTA y los CÁLCULOS (excluye 'Conciliado')
+        # Queryset para la VISTA y los CÁLCULOS (excluye 'Conciliado', esto no cambia)
         consignaciones_para_vista = consignaciones_qs.exclude(
             Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
         )
 
+        # --- LÓGICA CORREGIDA ---
+        # PASO 2: Extraer las fechas de transacción ORIGINALES de las consignaciones encontradas.
+        # La fecha de la transacción está en el campo 'fecha' de la consignación.
+        fechas_transacciones = consignaciones_para_vista.values_list('fecha__date', flat=True).distinct()
+        
+        # PASO 3: Filtrar las TRANSACCIONES DEL CAJERO usando esas fechas originales.
+        # Ya no usamos la fecha que mandó el usuario, sino las que encontramos en las consignaciones.
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.none() # Empezamos con un queryset vacío
+        if fechas_transacciones:
+            filtro_cajero_corregido = Q(fecha__date__in=fechas_transacciones)
+            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero_corregido)
+        
+            # Si se está filtrando por sucursal, aplicamos también el filtro a las transacciones
+            if sucursal_code and sucursal_code not in ['0', '-1']:
+                transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
+        # --- FIN DE LA LÓGICA CORREGIDA ---
+
+        # Obtener nombres de usuarios para optimizar
         responsable_ids = consignaciones_qs.values_list('responsable', flat=True).distinct()
         valid_responsable_ids = [int(id) for id in responsable_ids if id and str(id).isdigit()]
         usuarios_dict = {
             user.id: user.username 
             for user in User.objects.filter(id__in=valid_responsable_ids)
         }
-        
+
         # --- 1. PREPARAMOS LA LISTA PARA LA VISTA ---
         transacciones_data_vista = []
         for t in consignaciones_para_vista.order_by('-id'): # Usamos la lista FILTRADA
-            # ... (copia aquí todo el bloque para construir 'nueva_transaccion')
             banco = getattr(t, 'banco', '')
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
             if banco == 'Venta doble proposito':
@@ -1346,7 +2234,6 @@ def resumen_corresponsal(request):
         # --- 2. PREPARAMOS LA LISTA PARA EL EXCEL ---
         transacciones_data_excel = []
         for t in consignaciones_qs.order_by('-id'): # Usamos la lista COMPLETA
-            # ... (copia aquí todo el bloque para construir 'nueva_transaccion')
             banco = getattr(t, 'banco', '')
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
             if banco == 'Venta doble proposito':
@@ -1365,7 +2252,7 @@ def resumen_corresponsal(request):
             nueva_transaccion = { 'id': t.id, 'valor': getattr(t, 'valor', 0) or 0, 'banco': banco, 'fecha_consignacion': t.fecha_consignacion, 'fecha': t.fecha, 'responsable': responsable_username, 'estado': getattr(t, 'estado', ''), 'detalle': getattr(t, 'detalle', '') or '', 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''), 'detalle_categoria': detalle_categoria, 'url': getattr(t, 'url', None), 'min': getattr(t, 'min', None), 'imei': getattr(t, 'imei', None), 'planilla': getattr(t, 'planilla', None) }
             transacciones_data_excel.append(nueva_transaccion)
 
-        # Los cálculos siguen usando la lista filtrada ('consignaciones_para_vista')
+        # Cálculos finales con la lógica corregida
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
         total_saldado = consignaciones_para_vista.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
         total_pendiente = consignaciones_para_vista.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
@@ -1375,8 +2262,8 @@ def resumen_corresponsal(request):
             'titulo': titulo,
             'consignacion': total_saldado,
             'pendiente': total_pendiente,
-            'consignaciones': transacciones_data_vista,      # <-- Lista para la VISTA
-            'consignaciones_excel': transacciones_data_excel # <-- NUEVA lista para el EXCEL
+            'consignaciones': transacciones_data_vista,
+            'consignaciones_excel': transacciones_data_excel
         }
         return Response(data)
 
@@ -1469,13 +2356,12 @@ def select_datos_corresponsal(request):
 
 
 @api_view(['POST'])
+@asesor_permission_required  # <--- 1. APLICA EL DECORADOR
 def select_datos_corresponsal_cajero(request):
     try:
+        # 2. El usuario ya está autenticado y disponible en 'request.user'
+        user = request.user
         fecha_str = request.data['fecha']
-        token = request.data['jwt']
-        
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-        user = User.objects.get(username=payload['id'])
 
         responsable = models.Responsable_corresponsal.objects.filter(user=user).first()
         if not responsable or not responsable.sucursal:
@@ -1489,12 +2375,17 @@ def select_datos_corresponsal_cajero(request):
         
         codigo_sucursal = sucursal_obj.codigo
         
+        # Lógica de fechas
         if len(fecha_str) == 7:
-            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
-            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
+            # Para un mes completo (YYYY-MM)
+            fecha_inicio_naive = datetime.strptime(fecha_str, '%Y-%m')
+            # Usamos pd.offsets para obtener el último día del mes
+            fecha_fin_naive = (pd.to_datetime(fecha_str) + pd.offsets.MonthEnd(1)).to_pydatetime()
         else:
-            fecha_inicio_naive = datetime.datetime.strptime(fecha_str, '%Y-%m-%d')
-            fecha_fin_naive = fecha_inicio_naive
+            # Para un día específico (YYYY-MM-DD), cubrimos el día completo
+            fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            fecha_inicio_naive = datetime.combine(fecha_dia, time.min)
+            fecha_fin_naive = datetime.combine(fecha_dia, time.max)
 
         fecha_inicio = timezone.make_aware(fecha_inicio_naive)
         fecha_fin = timezone.make_aware(fecha_fin_naive)
@@ -1508,8 +2399,7 @@ def select_datos_corresponsal_cajero(request):
 
         return Response({'total': total_datos, 'sucursal': sucursal_terminal})
 
-    except User.DoesNotExist:
-        return Response({'error': 'Usuario del token no es válido.'}, status=401)
+    # 3. El decorador ya maneja el error 'User.DoesNotExist'
     except Exception as e:
         print(f"Error en select_datos_corresponsal_cajero: {str(e)}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
@@ -2318,30 +3208,38 @@ def shopify_return(request):
     return Response({"message":respuesta, "code": code})
     
 
-@api_view(['GET', 'POST', 'OPTIONS'])
+@api_view(['POST'])
 def login(request):
-    if request.method == 'POST':
-        username = request.data['email']
-        password = request.data['password']
-        user = authenticate(request, username=username, password= password)
-        if user is not None:
-            payload ={
-                'id': user.username,
-                'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes= 60),
-                'iat' : datetime.datetime.utcnow(),
-                'change': True if password == 'Cambiame123' else False
-            }
-            token = jwt.encode(payload, 'secret', algorithm='HS256')
-            response = Response()
-            response.set_cookie(key='jwt', value=token, httponly=True)
-            response.data = {
-                'jwt':token,
-            }
-            return response
-            return Response({'jwt':token})
-        else:
-            raise AuthenticationFailed('Clave o contraseña erroneas')
-    raise AuthenticationFailed('Solo metodo POST')
+    email = request.data.get('email')
+    password = request.data.get('password')
+
+    if not email or not password:
+        raise AuthenticationFailed('El email y la contraseña son requeridos.')
+
+    user = authenticate(request, username=email, password=password)
+
+    if user is not None:
+        payload = {
+            'id': user.id,
+            # 👇 ESTA ES LA FORMA CORRECTA con "from datetime import datetime"
+            'exp': datetime.utcnow() + timedelta(minutes=60),
+            'iat': datetime.utcnow(),
+            'change': True if password == 'Cambiame123' else False
+        }
+
+        token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+        print("="*20)
+        print("TOKEN CREADO EN LOGIN:")
+        print(token)
+        print("="*20)
+        response = Response()
+        response.set_cookie(key='jwt', value=token, httponly=True)
+        response.data = {
+            'jwt': token
+        }
+        return response
+    else:
+        raise AuthenticationFailed('Usuario o contraseña incorrectos.')
 
 @api_view(['GET', 'POST', 'OPTIONS'])
 def create_user(request):
@@ -2354,20 +3252,32 @@ def create_user(request):
 
 @api_view(['POST'])
 def user_validate(request):
-    if request.method == 'POST':
-        response = Response()
-        response.set_cookie(key='jwts', value='hhh', httponly=True)
-        data = request.body
-        token = json.loads(data)
-        token = token['jwt']
+    # Esta vista parece que solo valida si el token es correcto.
+    # La forma de obtener el token del cuerpo de la solicitud es un poco inusual,
+    # generalmente se envía en la cabecera 'Authorization', como en la otra vista.
+
+    try:
+        token = request.data.get('jwt') # Es más seguro usar .get()
         if not token:
-            raise AuthenticationFailed('Debes estar logueado')
-        try:
-            payload = jwt.decode(token, 'secret', algorithms='HS256')
-            
-        except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed('Debes estar logueado')
-        return Response({"cambioClave": False})
+            raise AuthenticationFailed('Token no proporcionado.')
+
+        # SOLUCIÓN 1: Usar la SECRET_KEY de Django
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+
+        # Aquí podrías verificar si el usuario del token aún existe
+        user = User.objects.filter(id=payload['id']).first()
+        if not user:
+             raise AuthenticationFailed('El usuario del token ya no existe.')
+
+    except jwt.InvalidSignatureError:
+        raise AuthenticationFailed('Firma del token inválida.')
+    except jwt.ExpiredSignatureError:
+        raise AuthenticationFailed('El token ha expirado.')
+    except Exception: # Captura cualquier otro error
+        raise AuthenticationFailed('Token inválido.')
+
+    # Si todo sale bien, retornas una respuesta exitosa.
+    return Response({"detail": "Token validado correctamente."})
 
 @api_view(['GET'])
 def user_permissions(request):
@@ -2377,8 +3287,11 @@ def user_permissions(request):
             return Response({'detail': 'Token no proporcionado.'}, status=401)
 
         token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
-        usuario = User.objects.get(username=payload['id'])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+        
+        # --- LÍNEA CORREGIDA ---
+        # Buscamos al usuario por su ID, no por su username
+        usuario = User.objects.get(id=payload['id'])
 
         if getattr(usuario, 'force_password_change', False):
             return Response({"cambioClave": True})
@@ -2409,6 +3322,8 @@ def user_permissions(request):
             "cambioClave": False
         })
 
+    except jwt.InvalidSignatureError:
+        return Response({'detail': 'Firma del token inválida.'}, status=401)
     except jwt.ExpiredSignatureError:
         return Response({'detail': 'Token ha expirado.'}, status=401)
     except User.DoesNotExist:
@@ -2447,7 +3362,7 @@ def permissions_matrix(request):
             raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
         
         token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         
         solicitante = User.objects.get(username=payload['id'])
         if not solicitante.is_superuser:
@@ -2499,7 +3414,7 @@ def permissions_edit(request):
             raise AuthenticationFailed('Token de autorización faltante o con formato incorrecto.')
         
         token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         solicitante = User.objects.get(username=payload['id'])
         if not solicitante.is_superuser:
             raise AuthenticationFailed('Solo los superusuarios pueden editar permisos.')
@@ -3007,7 +3922,7 @@ def lista_productos_prepago(request):
             if not auth_header or not auth_header.startswith('Bearer '):
                 return Response({'detail': 'Token no proporcionado.'}, status=401)
             token = auth_header.split(' ')[1]
-            payload = jwt.decode(token, 'secret', algorithms=['HS256'])
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             usuario = User.objects.get(username=payload.get('id'))
             permisos_por_usuario = {
                 '33333': ['Precio publico', 'Precio Fintech', 'Precio Addi'],

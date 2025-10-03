@@ -3,6 +3,8 @@ from rest_framework import routers
 from . import viewsets
 from . import views
 from .views import actas_entrega
+from .views import CustomTokenObtainPairView
+from rest_framework_simplejwt.views import TokenRefreshView
 
 router = routers.SimpleRouter()
 
@@ -67,8 +69,19 @@ urlpatterns = [
     path('translate-products-prepago/admin', views.delete_translate_product_admin),
     path('sales-report/upload/', views.upload_sales_report, name='upload_sales_report'),
     path('sales-report/dashboard/', views.get_sales_dashboard_data, name='get_sales_dashboard_data'),
-
-
-
+    path('api/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('comisiones/upload/', views.carga_comisiones_view, name='comision-upload'),
+    path('api/comisiones/consulta/', views.consulta_pdv_view, name='comision-consulta-pdv'), # <-- NUEVA RUTA
+    path('asesor/filtros/', views.filtros_reporte_view, name='asesor-filtros'),
+    path('asesor/pdv-por-ruta/', views.pdv_por_ruta_view, name='asesor-pdv-por-ruta'),
+    path('asesor/reporte/', views.reporte_asesor_view, name='asesor-reporte'),
+    path('admin/usuarios-con-ruta/', views.usuarios_con_ruta_view, name='admin-usuarios-con-ruta'),
+    path('admin/rutas/', views.lista_rutas_view, name='admin-lista-rutas'),
+    path('admin/asignar-ruta/', views.asignar_ruta_view, name='admin-asignar-ruta'),
+    path('asesor/comparativa/', views.reporte_comparativa_view, name='asesor-comparativa'),
+    path('asesor/pagar-comisiones/', views.pagar_comisiones_view, name='pagar-comisiones'),
+    path('admin/reporte-general/', views.reporte_general_view, name='reporte-general'),
+    path('comisiones/consulta-agrupada/', views.consulta_agrupada_pdv_view, name='consulta-agrupada-pdv'),
 
 ]
