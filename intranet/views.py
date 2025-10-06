@@ -2189,6 +2189,11 @@ def generate_unique_filename(original_name):
 @parser_classes([MultiPartParser, FormParser])
 @asesor_permission_required # <--- 1. APLICA EL DECORADOR
 def consignacion_corresponsal(request):
+    # --- AJUSTE DE DIAGNÓSTICO ---
+    # Importamos 'datetime' aquí para evitar conflictos con las importaciones
+    # globales del archivo y asegurar que usamos la referencia correcta.
+    from datetime import datetime
+    
     try:
         # 2. El usuario ya está autenticado por el decorador, lo tenemos en request.user
         usuario = request.user
@@ -2205,7 +2210,9 @@ def consignacion_corresponsal(request):
 
         # 4. El resto de la lógica permanece igual, pero usando 'usuario' directamente.
         consignacion_data = json.loads(consignacion_str)
-        # --- CORRECCIÓN AQUÍ ---
+        # --- CORRECCIÓN ---
+        # Usamos 'datetime.strptime' que ahora sabemos que se refiere a la clase
+        # gracias a la importación local de arriba.
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
         # --- Lógica para subir a SharePoint (sin cambios) ---
@@ -2243,7 +2250,7 @@ def consignacion_corresponsal(request):
         models.Corresponsal_consignacion.objects.create(
             valor=consignacion_data.get('valor'),
             banco=banco_categoria,
-            # --- CORRECCIÓN AQUÍ ---
+            # --- CORRECCIÓN ---
             fecha_consignacion=datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             fecha=fecha_reporte,
             responsable=usuario.id, # Usamos el id del usuario verificado
