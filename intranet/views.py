@@ -2187,19 +2187,10 @@ def generate_unique_filename(original_name):
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
-@asesor_permission_required # <--- 1. APLICA EL DECORADOR
+@asesor_permission_required
 def consignacion_corresponsal(request):
-    # --- AJUSTE DE DIAGNÓSTICO ---
-    # Importamos 'datetime' aquí para evitar conflictos con las importaciones
-    # globales del archivo y asegurar que usamos la referencia correcta.
-    from datetime import datetime
-    
     try:
-        # 2. El usuario ya está autenticado por el decorador, lo tenemos en request.user
         usuario = request.user
-
-        # 3. YA NO BUSCAMOS EL TOKEN EN LOS DATOS.
-        #    Validamos los otros campos del formulario.
         image = request.data.get('image')
         sucursal = request.data.get('sucursal')
         consignacion_str = request.data.get('data')
@@ -2208,14 +2199,12 @@ def consignacion_corresponsal(request):
         if not all([image, sucursal, consignacion_str, fecha_reporte_str]):
             return Response({'detail': 'Faltan datos en la solicitud (imagen, sucursal, data o fecha).'}, status=400)
 
-        # 4. El resto de la lógica permanece igual, pero usando 'usuario' directamente.
         consignacion_data = json.loads(consignacion_str)
-        # --- CORRECCIÓN ---
-        # Usamos 'datetime.strptime' que ahora sabemos que se refiere a la clase
-        # gracias a la importación local de arriba.
+        
+        # Esta línea es CORRECTA con "from datetime import datetime"
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-        # --- Lógica para subir a SharePoint (sin cambios) ---
+        # --- Lógica de SharePoint (sin cambios) ---
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
         client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
@@ -2231,12 +2220,16 @@ def consignacion_corresponsal(request):
 
         headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
         site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-        file_name = generate_unique_filename(image.name)
+        
+        # Asumiendo que tienes una función para generar nombres únicos
+        # from .utils import generate_unique_filename 
+        file_name = generate_unique_filename(image.name) # Asegúrate de tener esta función
+        
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
         response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
         response_upload.raise_for_status()
         
-        # --- Lógica de guardado en la BD (usando 'usuario.id') ---
+        # --- Lógica de guardado en la BD ---
         banco_categoria = consignacion_data.get('banco')
         estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
         detalle_banco_valor = None
@@ -2250,10 +2243,10 @@ def consignacion_corresponsal(request):
         models.Corresponsal_consignacion.objects.create(
             valor=consignacion_data.get('valor'),
             banco=banco_categoria,
-            # --- CORRECCIÓN ---
+            # Esta línea también es CORRECTA con la importación adecuada
             fecha_consignacion=datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             fecha=fecha_reporte,
-            responsable=usuario.id, # Usamos el id del usuario verificado
+            responsable=usuario.id,
             estado=estado,
             detalle=consignacion_data.get('detalle'),
             url=file_name,
@@ -2265,12 +2258,14 @@ def consignacion_corresponsal(request):
         )
 
         return Response({'detail': 'Consignación registrada correctamente'}, status=200)
-            
-    # El decorador ya maneja User.DoesNotExist, InvalidTokenError, etc.
+
     except requests.exceptions.RequestException as e:
         return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
     except Exception as e:
         print(f"ERROR en consignacion_corresponsal: {str(e)}")
+        # Devuelve el traceback para más detalles en el log
+        import traceback
+        traceback.print_exc()
         return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
 
 
