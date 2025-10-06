@@ -4615,7 +4615,7 @@ def generate_unique_filename(filename):
             # Obtener la extensión del archivo
             file_extension = filename.split('.')[-1]
             # Obtener la fecha y hora actual
-            current_time = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            current_time = datetime.now().strftime('%Y%m%d%H%M%S')
             # Generar una cadena aleatoria de 6 caracteres
             random_string = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
             # Combinar para crear un nombre único
