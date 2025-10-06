@@ -2185,10 +2185,35 @@ def generate_unique_filename(original_name):
     extension = Path(original_name).suffix
     return f"{uuid.uuid4()}{extension}"
 
+# -*- coding: utf-8 -*-
+import json
+import requests
+
+from datetime import datetime
+
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.response import Response
+from rest_framework.parsers import MultiPartParser, FormParser
+
+# Si tu decorador está en otro módulo, ajusta el import
+from .permissions import asesor_permission_required  # <- asegúrate de que esta ruta sea correcta
+
+# Modelos
+from . import models
+
+# Función para generar nombres únicos (asegúrate de que exista)
+from .utils import generate_unique_filename
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 @asesor_permission_required
 def consignacion_corresponsal(request):
+    """
+    Registra una consignación de corresponsal:
+      - Sube la imagen a SharePoint mediante Microsoft Graph.
+      - Persiste la transacción en la BD.
+    """
     try:
         usuario = request.user
         image = request.data.get('image')
@@ -2196,42 +2221,68 @@ def consignacion_corresponsal(request):
         consignacion_str = request.data.get('data')
         fecha_reporte_str = request.data.get('fecha')
 
+        # Validación de presencia de datos
         if not all([image, sucursal, consignacion_str, fecha_reporte_str]):
-            return Response({'detail': 'Faltan datos en la solicitud (imagen, sucursal, data o fecha).'}, status=400)
+            return Response(
+                {'detail': 'Faltan datos en la solicitud (imagen, sucursal, data o fecha).'},
+                status=400
+            )
 
-        consignacion_data = json.loads(consignacion_str)
-        
-        # Esta línea es CORRECTA con "from datetime import datetime"
+        # Parseo del JSON de la consignación
+        try:
+            consignacion_data = json.loads(consignacion_str)
+        except json.JSONDecodeError:
+            return Response(
+                {'detail': 'El campo "data" no contiene JSON válido.'},
+                status=400
+            )
+
+        # Parseo de fechas con la importación correcta (from datetime import datetime)
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-        # --- Lógica de SharePoint (sin cambios) ---
+        # --- Lógica de SharePoint (Microsoft Graph) ---
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
         client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+
         url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
         data_ms = {
-            'grant_type': 'client_credentials', 'client_id': client_id,
-            'client_secret': client_secret, 'scope': 'https://graph.microsoft.com/.default'
+            'grant_type': 'client_credentials',
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'scope': 'https://graph.microsoft.com/.default'
         }
-        response_ms = requests.post(url, headers=headers, data=data_ms)
+
+        response_ms = requests.post(url, headers=headers, data=data_ms, timeout=30)
         response_ms.raise_for_status()
         access_token = response_ms.json().get('access_token')
 
-        headers_sp = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/octet-stream'}
+        if not access_token:
+            return Response({'detail': 'No se pudo obtener el access_token de Microsoft Graph.'}, status=503)
+
+        headers_sp = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/octet-stream'
+        }
+
         site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-        
-        # Asumiendo que tienes una función para generar nombres únicos
-        # from .utils import generate_unique_filename 
-        file_name = generate_unique_filename(image.name) # Asegúrate de tener esta función
-        
+
+        # Genera un nombre único para el archivo
+        file_name = generate_unique_filename(image.name)
+
+        # Sube el archivo (imagen) a la carpeta /uploads/ del drive raíz del sitio
         upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
-        response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
+        response_upload = requests.put(upload_url, headers=headers_sp, data=image.read(), timeout=120)
         response_upload.raise_for_status()
-        
+
         # --- Lógica de guardado en la BD ---
         banco_categoria = consignacion_data.get('banco')
+
+        # Estado por categoría
         estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
+
+        # Detalle adicional según banco/categoría
         detalle_banco_valor = None
         if banco_categoria in ['Proveedores', 'Obligaciones financieras']:
             detalle_banco_valor = consignacion_data.get('proveedor')
@@ -2240,18 +2291,21 @@ def consignacion_corresponsal(request):
         elif banco_categoria == 'Impuestos':
             detalle_banco_valor = consignacion_data.get('impuestoDetalle')
 
+        # Fecha de consignación desde data
+        fecha_consignacion = datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date()
+
         models.Corresponsal_consignacion.objects.create(
             valor=consignacion_data.get('valor'),
             banco=banco_categoria,
-            # Esta línea también es CORRECTA con la importación adecuada
-            fecha_consignacion=datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+            fecha_consignacion=fecha_consignacion,
             fecha=fecha_reporte,
             responsable=usuario.id,
             estado=estado,
             detalle=consignacion_data.get('detalle'),
-            url=file_name,
+            url=file_name,  # Guardamos el nombre/ubicación del archivo subido
             codigo_incocredito=sucursal,
             detalle_banco=detalle_banco_valor,
+            # Campos específicos solo para "Venta doble proposito"
             min=consignacion_data.get('min') if banco_categoria == 'Venta doble proposito' else None,
             imei=consignacion_data.get('imei') if banco_categoria == 'Venta doble proposito' else None,
             planilla=consignacion_data.get('planilla') if banco_categoria == 'Venta doble proposito' else None,
@@ -2262,8 +2316,8 @@ def consignacion_corresponsal(request):
     except requests.exceptions.RequestException as e:
         return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
     except Exception as e:
+        # Log detallado del traceback en consola/servidor
         print(f"ERROR en consignacion_corresponsal: {str(e)}")
-        # Devuelve el traceback para más detalles en el log
         import traceback
         traceback.print_exc()
         return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
