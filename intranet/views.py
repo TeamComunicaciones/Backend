@@ -2205,6 +2205,7 @@ def consignacion_corresponsal(request):
 
         # 4. El resto de la lógica permanece igual, pero usando 'usuario' directamente.
         consignacion_data = json.loads(consignacion_str)
+        # --- CORRECCIÓN AQUÍ ---
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
         # --- Lógica para subir a SharePoint (sin cambios) ---
@@ -2242,6 +2243,7 @@ def consignacion_corresponsal(request):
         models.Corresponsal_consignacion.objects.create(
             valor=consignacion_data.get('valor'),
             banco=banco_categoria,
+            # --- CORRECCIÓN AQUÍ ---
             fecha_consignacion=datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             fecha=fecha_reporte,
             responsable=usuario.id, # Usamos el id del usuario verificado
@@ -2263,6 +2265,8 @@ def consignacion_corresponsal(request):
     except Exception as e:
         print(f"ERROR en consignacion_corresponsal: {str(e)}")
         return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
+
+
 
 
 
