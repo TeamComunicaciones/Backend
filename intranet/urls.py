@@ -83,5 +83,6 @@ urlpatterns = [
     path('asesor/pagar-comisiones/', views.pagar_comisiones_view, name='pagar-comisiones'),
     path('admin/reporte-general/', views.reporte_general_view, name='reporte-general'),
     path('comisiones/consulta-agrupada/', views.consulta_agrupada_pdv_view, name='consulta-agrupada-pdv'),
-
+    path('admin/exportar-reporte/', views.exportar_reporte_excel, name='exportar_reporte_excel'),
+    path('admin/fecha-corte/', views.fecha_corte_view, name='fecha_corte'), 
 ]

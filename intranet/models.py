@@ -223,6 +223,14 @@ class PagoComision(models.Model):
         # Comprobamos si 'creado_por' existe para evitar errores
         usuario = self.creado_por.username if self.creado_por else "Usuario Desconocido"
         return f"Pago por {usuario} de {self.monto_total_pagado} el {self.fecha_pago.strftime('%Y-%m-%d')}"
+
+class Configuracion(models.Model):
+    """Guarda pares clave-valor para ajustes generales del sistema."""
+    clave = models.CharField(max_length=50, unique=True, primary_key=True)
+    valor = models.CharField(max_length=255)
+
+    def __str__(self):
+        return f"{self.clave}: {self.valor}"
     
 class Comision(models.Model):
     asesor = models.ForeignKey(
@@ -261,12 +269,14 @@ class Comision(models.Model):
         ('Acumulada', 'Acumulada'),
         ('Pagada', 'Pagada'),
         ('Consolidada', 'Consolidada'),
+        ('Vencida', 'Vencida'),
     ]
     estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Pendiente', db_index=True)
     fecha_carga = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Comisión para {self.asesor_identificador} - ICCID: {self.iccid}"
+    
 
     class Meta:
         verbose_name = "Comisión"
