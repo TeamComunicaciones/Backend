@@ -77,6 +77,7 @@ from .services import process_sales_report_file
 from .tasks import procesar_archivo_comisiones
 
 
+
 def asesor_permission_required(view_func):
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
@@ -2185,24 +2186,6 @@ def generate_unique_filename(original_name):
     extension = Path(original_name).suffix
     return f"{uuid.uuid4()}{extension}"
 
-# -*- coding: utf-8 -*-
-import json
-import requests
-
-from datetime import datetime
-
-from rest_framework.decorators import api_view, parser_classes
-from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
-
-# Si tu decorador está en otro módulo, ajusta el import
-from .permissions import asesor_permission_required  # <- asegúrate de que esta ruta sea correcta
-
-# Modelos
-from . import models
-
-# Función para generar nombres únicos (asegúrate de que exista)
-from .utils import generate_unique_filename
 
 
 @api_view(['POST'])
