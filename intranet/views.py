@@ -1,99 +1,80 @@
-# 1. Librerías Estándar de Python
+# 1. Standard Library Imports
 import ast
 import base64
-import datetime
+import calendar
+import decimal
 import io
 import json
 import locale
+import operator
 import os
 import random
-from functools import wraps
-from django.db.models.functions import TruncMonth 
-from dateutil.relativedelta import relativedelta
-from rest_framework.permissions import IsAdminUser
-from django.db.models import Sum, Count, Q, Case, When, DecimalField, Value
-from datetime import date
-from datetime import datetime
-from django.db.models.functions import Coalesce
-from django.contrib.postgres.aggregates import ArrayAgg
-from datetime import datetime, timedelta, date, time
-from django.conf import settings
+import re
 import shutil
 import string
+import tempfile
 import traceback
-from django.db.models import Subquery, OuterRef, Q, Max, F
-from django.db.models import Sum
-from rest_framework_simplejwt.views import TokenObtainPairView
-from .serializers import CustomTokenObtainPairSerializer, UserDataSerializer
-from django.contrib.auth.models import User
-from django.conf import settings
-from rest_framework.pagination import PageNumberPagination
-from .serializers import ComisionSerializer
-import calendar
 import uuid
-from datetime import date
-from decimal import Decimal
-from rest_framework import status
-from functools import reduce
 from collections import defaultdict
-import operator
-import pytz 
-from django.utils.dateparse import parse_datetime
-from django.views.decorators.csrf import csrf_exempt # <-- AÑADE ESTA LÍNEA
-import decimal
-from rest_framework.decorators import api_view, parser_classes # <-- LÍNEA CORREGIDA
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from django.db.models.functions import Lag
-from .tasks import procesar_archivo_comisiones # <-- Importa la nueva tarea
-from django.core.files.storage import FileSystemStorage
-from .models import Comision
+from datetime import datetime, date, timedelta, time
+from decimal import Decimal, InvalidOperation
+from functools import reduce, wraps
 
-# 2. Librerías de Terceros
+import pytz
+
+# 2. Third-party Library Imports
 import jwt
 import numpy as np
 import pandas as pd
 import requests
+from dateutil.relativedelta import relativedelta
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
+from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidTokenError
+
+# 3. Django Imports
+from django.conf import settings
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.contrib.postgres.aggregates import ArrayAgg
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.files.base import ContentFile
-from django.core.files.storage import default_storage
+from django.core.files.storage import default_storage, FileSystemStorage
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Prefetch, Q, Sum
-from django.db.models.functions import TruncDay
+from django.db.models import (
+    Case, Count, DecimalField, F, Max, OuterRef, Prefetch, Q, Subquery, Sum,
+    Value, When
+)
+from django.db.models.functions import Coalesce, Lag, TruncDay, TruncMonth
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidTokenError
-from rest_framework.decorators import api_view, permission_classes, schema
+from django.utils.dateparse import parse_datetime
+from django.views.decorators.csrf import csrf_exempt
+
+# 4. Django REST Framework Imports
+from rest_framework import status
+from rest_framework.decorators import (api_view, parser_classes,
+                                       permission_classes, schema)
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
-from .models import Permisos_usuarios
+from rest_framework_simplejwt.views import TokenObtainPairView
 
-import re
-import ast
-from django.db import transaction
-from decimal import Decimal, InvalidOperation
-
-# 3. Imports de la Aplicación Local
+# 5. Local Application Imports
 from sqlControl.sqlControl import Sql_conexion
 from . import models
-from .models import ActaEntrega, ImagenLogin
-from .serializers import ActaEntregaSerializer, ImagenLoginSerializer
-
-from rest_framework.decorators import api_view, parser_classes
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.response import Response
-from rest_framework import status
-from .models import ReporteDetalleVenta
+from .models import (ActaEntrega, Comision, ImagenLogin, Permisos_usuarios,
+                     ReporteDetalleVenta)
+from .serializers import (ActaEntregaSerializer, ComisionSerializer,
+                          CustomTokenObtainPairSerializer,
+                          ImagenLoginSerializer, UserDataSerializer)
 from .services import process_sales_report_file
+from .tasks import procesar_archivo_comisiones
 
 
 def asesor_permission_required(view_func):
@@ -664,25 +645,25 @@ def consulta_agrupada_pdv_view(request):
 def reporte_general_view(request):
     """
     Genera un reporte general de comisiones con filtros dinámicos para el dashboard de administración.
+    --- VERSIÓN ACTUALIZADA PARA INCLUIR ESTADO 'VENCIDA' ---
     """
-    # 1. Leer los parámetros de la URL
+    # 1. Leer los parámetros de la URL (sin cambios)
     fecha_inicio_str = request.query_params.get('fecha_inicio')
     fecha_fin_str = request.query_params.get('fecha_fin')
     rutas_filter = request.query_params.getlist('rutas')
     estados_filter = request.query_params.getlist('estados')
 
-    # 2. Construir el queryset base
-    # Excluimos 'Consolidada' como acordamos, para no duplicar datos.
+    # 2. Construir el queryset base (sin cambios)
     base_queryset = models.Comision.objects.exclude(estado='Consolidada')
 
-    # 3. Aplicar filtros dinámicamente
+    # 3. Aplicar filtros dinámicamente (sin cambios)
     if fecha_inicio_str and fecha_fin_str:
         try:
             fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
             fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
             base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
         except (ValueError, TypeError):
-            pass # Ignora fechas inválidas
+            pass
 
     if rutas_filter:
         base_queryset = base_queryset.filter(ruta__in=rutas_filter)
@@ -690,62 +671,197 @@ def reporte_general_view(request):
     if estados_filter:
         base_queryset = base_queryset.filter(estado__in=estados_filter)
 
-    # 4. Calcular los KPIs
+    # 4. Calcular los KPIs (MODIFICADO)
     kpis_data = base_queryset.aggregate(
         pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
-        pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+        pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0),
+        vencido=Sum('comision_final', filter=Q(estado='Vencida'), default=0) # <-- AÑADIDO
     )
-    total_comisiones = (kpis_data.get('pagado') or 0) + (kpis_data.get('pendiente') or 0)
-
-    # 5. Preparar datos para las gráficas
     
-    # Gráfica 1: Evolución Mensual (Barras)
-    evolucion_mensual = base_queryset \
-        .annotate(month=TruncMonth('mes_pago')) \
-        .values('month') \
-        .annotate(
-            pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
-            pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
-        ) \
-        .order_by('month')
+    # Total ahora incluye 'vencido'
+    total_comisiones = (kpis_data.get('pagado') or 0) + (kpis_data.get('pendiente') or 0) + (kpis_data.get('vencido') or 0)
+
+    # 5. Preparar datos para las gráficas (MODIFICADO)
+    # En la evolución mensual, 'pendiente' agrupará todo lo no pagado para claridad.
+    evolucion_mensual = base_queryset.annotate(month=TruncMonth('mes_pago')).values('month').annotate(
+        pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
+        pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada', 'Vencida']), default=0) # <-- MODIFICADO
+    ).order_by('month')
 
     evolucion_chart_data = [
-        {
-            "mes": item['month'].strftime('%Y-%m') if item['month'] else 'Sin Fecha',
-            "pagado": item['pagado'],
-            "pendiente": item['pendiente']
-        } for item in evolucion_mensual
-    ]
-    
-    # Gráfica 2: Distribución por Estado (Dona)
-    distribucion_estado = base_queryset \
-        .values('estado') \
-        .annotate(total=Sum('comision_final')) \
-        .order_by('estado')
-    
-    # Gráfica 3: Picos Mensuales (Línea)
-    picos_mensuales_chart_data = [
-        {
-            "mes": item['mes'],
-            "total": (item['pagado'] or 0) + (item['pendiente'] or 0)
-        } for item in evolucion_chart_data
+        {"mes": item['month'].strftime('%Y-%m') if item['month'] else 'Sin Fecha', "pagado": item['pagado'], "pendiente": item['pendiente']}
+        for item in evolucion_mensual
     ]
 
-    # 6. Construir la respuesta final
+    # Esta gráfica funciona sin cambios, ya que agrupa por cualquier estado presente.
+    distribucion_estado = base_queryset.values('estado').annotate(total=Sum('comision_final')).order_by('estado')
+
+    picos_mensuales_chart_data = [
+        {"mes": item['mes'], "total": (item['pagado'] or 0) + (item['pendiente'] or 0)}
+        for item in evolucion_chart_data
+    ]
+
+    # Lógica de métodos de pago (sin cambios)
+    pagos_ids = base_queryset.exclude(pagos__isnull=True).values_list('pagos_id', flat=True).distinct()
+    pagos_filtrados = models.PagoComision.objects.filter(id__in=pagos_ids)
+    valor_por_metodo = defaultdict(float)
+    cantidad_por_metodo = defaultdict(int)
+
+    for pago in pagos_filtrados:
+        if isinstance(pago.metodos_pago, dict):
+            for metodo, valor in pago.metodos_pago.items():
+                valor_por_metodo[metodo] += float(valor)
+                cantidad_por_metodo[metodo] += 1
+    
+    reporte_metodos_pago = [
+        {'metodo': metodo, 'total_valor': total_valor, 'total_cantidad': cantidad_por_metodo.get(metodo, 0)}
+        for metodo, total_valor in valor_por_metodo.items()
+    ]
+
+    # 6. Construir la respuesta final (MODIFICADO)
     data = {
         "kpis": {
             "total": total_comisiones,
             "pagado": kpis_data.get('pagado') or 0,
-            "pendiente": kpis_data.get('pendiente') or 0
+            "pendiente": kpis_data.get('pendiente') or 0,
+            "vencido": kpis_data.get('vencido') or 0 # <-- AÑADIDO
         },
         "charts": {
             "evolucion_mensual": evolucion_chart_data,
             "distribucion_estado": list(distribucion_estado),
-            "picos_mensuales": picos_mensuales_chart_data
+            "picos_mensuales": picos_mensuales_chart_data,
+            "metodos_pago": reporte_metodos_pago
         }
     }
     
     return Response(data)
+
+@api_view(['GET'])
+@asesor_permission_required
+def exportar_reporte_excel(request):
+    """
+    Genera y devuelve un archivo Excel con el detalle de las comisiones filtradas.
+    """
+    # 1. Reutilizamos la misma lógica de filtrado de la vista del reporte general
+    fecha_inicio_str = request.query_params.get('fecha_inicio')
+    fecha_fin_str = request.query_params.get('fecha_fin')
+    rutas_filter = request.query_params.getlist('rutas')
+    estados_filter = request.query_params.getlist('estados')
+
+    base_queryset = models.Comision.objects.exclude(estado='Consolidada')
+
+    if fecha_inicio_str and fecha_fin_str:
+        fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
+        fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
+        base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
+    if rutas_filter:
+        base_queryset = base_queryset.filter(ruta__in=rutas_filter)
+    if estados_filter:
+        base_queryset = base_queryset.filter(estado__in=estados_filter)
+
+    # 2. Seleccionamos los campos que queremos en el Excel
+    comisiones_a_exportar = base_queryset.values(
+        'asesor_identificador',
+        'asesor__email', # <-- CORREGIDO: Se accede directamente al email del asesor
+        'iccid',
+        'min',
+        'producto',
+        'punto_de_venta',
+        'ruta',
+        'comision_final',
+        'estado',
+        'mes_liquidacion',
+        'mes_pago',
+        'fecha_carga'
+    )
+
+    # 3. Convertimos el queryset a un DataFrame de Pandas
+    df = pd.DataFrame.from_records(comisiones_a_exportar)
+
+    # 4. Hacemos el reporte más "robusto" y "ordenado"
+    if not df.empty:
+        # Renombramos las columnas para que sean más legibles
+        df.rename(columns={
+            'asesor_identificador': 'Asesor',
+            'asesor__email': 'Email Asesor', # <-- CORREGIDO: El nombre del campo coincide con la consulta
+            'iccid': 'ICCID',
+            'min': 'MIN',
+            'producto': 'Producto',
+            'punto_de_venta': 'Punto de Venta',
+            'ruta': 'Ruta',
+            'comision_final': 'Valor Comisión',
+            'estado': 'Estado',
+            'mes_liquidacion': 'Mes Liquidación',
+            'mes_pago': 'Mes Pago',
+            'fecha_carga': 'Fecha de Carga Original'
+        }, inplace=True)
+
+        # Aseguramos un orden de columnas lógico
+        columnas_ordenadas = [
+            'Mes Pago', 'Mes Liquidación', 'Asesor', 'Email Asesor', 'Ruta', 
+            'Punto de Venta', 'Producto', 'ICCID', 'MIN', 'Valor Comisión', 'Estado', 
+            'Fecha de Carga Original'
+        ]
+        # Nos aseguramos de que solo se incluyan las columnas que existen en el DataFrame
+        df = df[[col for col in columnas_ordenadas if col in df.columns]]
+
+        # Formateamos las fechas para que se vean bien en Excel
+        df['Mes Pago'] = pd.to_datetime(df['Mes Pago']).dt.strftime('%Y-%m-%d')
+        df['Mes Liquidación'] = pd.to_datetime(df['Mes Liquidación']).dt.strftime('%Y-%m-%d')
+        df['Fecha de Carga Original'] = pd.to_datetime(df['Fecha de Carga Original']).dt.strftime('%Y-%m-%d %H:%M')
+    
+    # 5. Creamos el archivo Excel en memoria
+    from io import BytesIO
+    output = BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Detalle Comisiones', index=False)
+
+    output.seek(0)
+
+    # 6. Preparamos la respuesta HTTP
+    filename = f"Reporte_Comisiones_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    response = HttpResponse(
+        output,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+    return response
+
+@api_view(['GET', 'POST'])
+@asesor_permission_required# ¡Protege esta vista! Solo los admins deben poder cambiar esto.
+def fecha_corte_view(request):
+    """
+    Obtiene o establece el día del mes para la fecha de corte de comisiones.
+    """
+    CLAVE_CONFIG = 'FECHA_CORTE_DIA'
+    
+    if request.method == 'GET':
+        # get_or_create asegura que siempre tengamos un valor, creando uno por defecto si no existe.
+        config, _ = models.Configuracion.objects.get_or_create(
+            clave=CLAVE_CONFIG,
+            defaults={'valor': '25'}  # Puedes poner un valor por defecto, como el día 25.
+        )
+        return Response({'dia': config.valor})
+
+    elif request.method == 'POST':
+        nuevo_dia = request.data.get('dia')
+        
+        # Validación robusta
+        if not nuevo_dia or not str(nuevo_dia).isdigit() or not (1 <= int(nuevo_dia) <= 31):
+            return Response(
+                {'error': 'El valor proporcionado es inválido. Debe ser un número entre 1 y 31.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # update_or_create es eficiente: actualiza el valor si la clave existe, o la crea si no.
+        config, _ = models.Configuracion.objects.update_or_create(
+            clave=CLAVE_CONFIG,
+            defaults={'valor': str(nuevo_dia)}
+        )
+        
+        return Response({'mensaje': f'Fecha de corte actualizada correctamente al día {nuevo_dia} de cada mes.'})
 
 @api_view(['GET'])
 @asesor_permission_required
@@ -996,15 +1112,18 @@ def formulas_prices(request, id=None):
         return Response({'error': e}, status=400)
     
     
-# tu_app/views.py
+
 
 @api_view(['POST'])
-@asesor_permission_required
 @parser_classes([MultiPartParser, FormParser])
+@asesor_permission_required
 def carga_comisiones_view(request):
+    """
+    Gestiona la subida y validación de archivos Excel para comisiones.
+    --- CORREGIDO para manejar meses en español ---
+    """
     
-    # 2. Hacemos la validación de permisos de negocio de forma más limpia
-    #    usando el `request.user` que DRF ya nos dio.
+    # === SECCIÓN 1: CHEQUEO DE PERMISOS ===
     if not models.Permisos_usuarios.objects.filter(
         user=request.user, 
         permiso__permiso='admin_comisiones', 
@@ -1015,24 +1134,85 @@ def carga_comisiones_view(request):
             status=status.HTTP_403_FORBIDDEN
         )
 
-    # 3. La lógica de carga del archivo se mantiene igual
-    archivo_excel = request.FILES.get('file')
-    if not archivo_excel:
-        return Response({'error': 'No se proporcionó archivo'}, status=status.HTTP_400_BAD_REQUEST)
+    # === SECCIÓN 2: VALIDACIÓN INICIAL DEL ARCHIVO ===
+    archivo = request.FILES.get('file')
+    if not archivo:
+        return Response({'error': 'No se proporcionó ningún archivo.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    fs = FileSystemStorage(location='tmp/')
-    if not os.path.exists('tmp/'):
-        os.makedirs('tmp/')
-    filename = fs.save(archivo_excel.name, archivo_excel)
-    file_path = os.path.join(os.getcwd(), 'tmp', filename)
+    # <--- 2. INICIO DEL BLOQUE DE LOCALE ---
+    # Guardamos la configuración de idioma actual para restaurarla después
+    current_locale = locale.getlocale(locale.LC_TIME)
+    try:
+        # Intentamos configurar el idioma a español (para Linux/macOS y Windows)
+        try:
+            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+        except locale.Error:
+            locale.setlocale(locale.LC_TIME, 'Spanish')
 
-    # 4. Llamamos a la tarea con el ID del usuario ya verificado
+        # === SECCIÓN 3: VALIDACIÓN DE CONTENIDO DEL EXCEL ===
+        # Todo el bloque de validación de pandas va dentro del try del locale
+        try:
+            xls = pd.ExcelFile(archivo)
+
+            # REGLA 1: Debe tener exactamente una hoja.
+            if len(xls.sheet_names) != 1:
+                return Response(
+                    {'errores': [f'Archivo rechazado: Debe contener exactamente una hoja, pero se encontraron {len(xls.sheet_names)}.']},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            df = pd.read_excel(xls, sheet_name=0, dtype=str)
+
+            # REGLA 2: La columna 'MES LIQUIDACIÓN' es obligatoria.
+            if 'MES LIQUIDACIÓN' not in df.columns:
+                return Response(
+                    {'errores': ['Archivo rechazado: Falta la columna obligatoria "MES LIQUIDACIÓN".']},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            # REGLA 3: Todos los registros deben pertenecer a un único mes.
+            # Esta línea ahora funcionará correctamente con meses en español.
+            meses = pd.to_datetime(df['MES LIQUIDACIÓN'], format='%B %Y', errors='coerce').dt.to_period('M')
+            
+            meses_unicos = meses.dropna().nunique()
+
+            if meses_unicos > 1:
+                return Response(
+                    {'errores': [f'Archivo rechazado: Solo se permite un mes por archivo, pero se encontraron {meses_unicos} meses diferentes.']},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            if meses_unicos == 0:
+                return Response(
+                    {'errores': ['Archivo rechazado: No se encontraron registros con un formato de mes válido (Ej: "octubre 2025").']},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception as e:
+            return Response(
+                {'errores': [f'No se pudo leer el archivo. Verifique que sea un formato Excel (.xlsx) válido.']},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    finally:
+        # <--- 3. RESTAURACIÓN DEL LOCALE ---
+        # Es crucial restaurar la configuración de idioma original para no afectar otras partes de la app.
+        locale.setlocale(locale.LC_TIME, current_locale)
+    
+    # === SECCIÓN 4: GUARDADO Y EJECUCIÓN DE TAREA ASÍNCRONA ===
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_f:
+        archivo.seek(0) 
+        for chunk in archivo.chunks():
+            temp_f.write(chunk)
+        file_path = temp_f.name
+
     procesar_archivo_comisiones.delay(file_path, request.user.id)
 
     return Response(
-        {'mensaje': 'El archivo ha sido recibido y se está procesando en segundo plano.'}, 
+        {'mensaje': 'Archivo validado y aceptado. El procesamiento ha comenzado en segundo plano.'}, 
         status=status.HTTP_202_ACCEPTED
     )
+
+    
 
 @swagger_auto_schema(
     method='get',
@@ -2007,23 +2187,25 @@ def generate_unique_filename(original_name):
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
+@asesor_permission_required # <--- 1. APLICA EL DECORADOR
 def consignacion_corresponsal(request):
     try:
-        # Usar request.data para acceder a todos los campos es más limpio
-        token = request.data.get('jwt')
+        # 2. El usuario ya está autenticado por el decorador, lo tenemos en request.user
+        usuario = request.user
+
+        # 3. YA NO BUSCAMOS EL TOKEN EN LOS DATOS.
+        #    Validamos los otros campos del formulario.
         image = request.data.get('image')
         sucursal = request.data.get('sucursal')
         consignacion_str = request.data.get('data')
         fecha_reporte_str = request.data.get('fecha')
 
-        if not all([token, image, sucursal, consignacion_str, fecha_reporte_str]):
-            return Response({'detail': 'Faltan datos en la solicitud.'}, status=400)
+        if not all([image, sucursal, consignacion_str, fecha_reporte_str]):
+            return Response({'detail': 'Faltan datos en la solicitud (imagen, sucursal, data o fecha).'}, status=400)
 
+        # 4. El resto de la lógica permanece igual, pero usando 'usuario' directamente.
         consignacion_data = json.loads(consignacion_str)
-        fecha_reporte = datetime.datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
-
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-        usuario = User.objects.get(username=payload['id'])
+        fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
         # --- Lógica para subir a SharePoint (sin cambios) ---
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
@@ -2046,7 +2228,7 @@ def consignacion_corresponsal(request):
         response_upload = requests.put(upload_url, headers=headers_sp, data=image.read())
         response_upload.raise_for_status()
         
-        # --- Lógica de guardado en la BD (sin cambios) ---
+        # --- Lógica de guardado en la BD (usando 'usuario.id') ---
         banco_categoria = consignacion_data.get('banco')
         estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
         detalle_banco_valor = None
@@ -2060,9 +2242,9 @@ def consignacion_corresponsal(request):
         models.Corresponsal_consignacion.objects.create(
             valor=consignacion_data.get('valor'),
             banco=banco_categoria,
-            fecha_consignacion=datetime.datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
+            fecha_consignacion=datetime.strptime(consignacion_data.get('fechaConsignacion'), '%Y-%m-%d').date(),
             fecha=fecha_reporte,
-            responsable=usuario.id,
+            responsable=usuario.id, # Usamos el id del usuario verificado
             estado=estado,
             detalle=consignacion_data.get('detalle'),
             url=file_name,
@@ -2075,8 +2257,7 @@ def consignacion_corresponsal(request):
 
         return Response({'detail': 'Consignación registrada correctamente'}, status=200)
             
-    except User.DoesNotExist:
-        return Response({'detail': 'Usuario no válido'}, status=401)
+    # El decorador ya maneja User.DoesNotExist, InvalidTokenError, etc.
     except requests.exceptions.RequestException as e:
         return Response({'detail': f'Error de comunicación con Microsoft Graph: {e}'}, status=503)
     except Exception as e:
@@ -2407,6 +2588,11 @@ def select_datos_corresponsal_cajero(request):
 
 @api_view(['POST'])
 def guardar_datos_corresponsal(request):
+    """
+    Procesa y/o guarda los datos de transacciones de un corresponsal.
+    'action': 'analyze' -> Analiza los datos en busca de duplicados en el archivo y en la base de datos.
+    'action': 'save' -> Guarda los registros filtrados en la base de datos.
+    """
     action = request.data.get('action', 'analyze') 
     cabecera = request.data['cabecera']
     items = request.data['items']
@@ -2415,6 +2601,7 @@ def guardar_datos_corresponsal(request):
     df.fillna("", inplace=True)
 
     if action == 'analyze':
+        # --- Lógica de Análisis ---
         for col in df.columns:
             if df[col].dtype == 'object':
                 df[col] = df[col].astype(str).str.strip()
@@ -2481,6 +2668,7 @@ def guardar_datos_corresponsal(request):
         })
 
     elif action == 'save':
+        # --- Lógica de Guardado ---
         transacciones_para_crear = []
         for item_row in items:
             row_dict = dict(zip(cabecera, item_row))
@@ -2490,7 +2678,9 @@ def guardar_datos_corresponsal(request):
                 nura = int(float(row_dict.get('nura', 0)))
                 comision = int(float(row_dict.get('comision', 0)))
                 fecha_str = row_dict.get('fecha', '')
-                fecha_dt = datetime.datetime.strptime(fecha_str, "%d/%m/%Y").date()
+                
+                fecha_dt = datetime.strptime(fecha_str, "%d/%m/%Y").date()
+                
             except (ValueError, TypeError):
                 continue
             
