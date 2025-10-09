@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+import os 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -184,9 +185,9 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'America/Bogota'
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'  # Ejemplo para Gmail
+EMAIL_HOST = 'smtp.gmail.com'  # O el host de tu proveedor
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'moonwayn@gmail.com'  # Tu dirección de correo
-EMAIL_HOST_PASSWORD = 'xjfm zwiz yrlx zsgt' # ¡Usa una contraseña de aplicación!
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')  # ¡Usa variables de entorno!
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD') # ¡Usa variables de entorno!
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
