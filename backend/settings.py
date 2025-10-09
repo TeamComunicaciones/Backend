@@ -182,3 +182,11 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'America/Bogota'
+
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'  # Ejemplo para Gmail
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'moonwayn@gmail.com'  # Tu dirección de correo
+EMAIL_HOST_PASSWORD = 'xjfm zwiz yrlx zsgt' # ¡Usa una contraseña de aplicación!
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
