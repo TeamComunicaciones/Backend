@@ -19,10 +19,10 @@ from collections import defaultdict
 from datetime import datetime, date, timedelta, time
 from decimal import Decimal, InvalidOperation
 from functools import reduce, wraps
-
+import logging
 from io import BytesIO
 import pytz
-
+from openpyxl import Workbook
 # 2. Third-party Library Imports
 import jwt
 import numpy as np
@@ -793,113 +793,96 @@ def reporte_general_view(request):
     
     return Response(data)
 
+logger = logging.getLogger(__name__)
 @api_view(['GET'])
-@asesor_permission_required # El decorador original era 'asesor_permission_required', lo mantengo. Si es para admin, podría ser otro.
+@asesor_permission_required
 def exportar_reporte_excel(request):
     """
-    Genera y devuelve un archivo Excel con el detalle de las comisiones filtradas.
-    Esta versión está optimizada para mayor velocidad y corrige el filtrado por fechas.
+    Genera y devuelve un archivo XLSX con el detalle de las comisiones filtradas.
+    Esta versión está optimizada para bajo consumo de memoria, creando el archivo
+    fila por fila directamente, sin usar pandas.
     """
-    # 1. Lógica de filtrado mejorada
-    fecha_inicio_str = request.GET.get('fecha_inicio')
-    fecha_fin_str = request.GET.get('fecha_fin')
-    rutas_filter = request.GET.getlist('rutas')
-    estados_filter = request.GET.getlist('estados')
+    try:
+        # 1. Lógica de filtrado (sin cambios)
+        logger.info("Iniciando la exportación de reporte XLSX optimizado.")
+        fecha_inicio_str = request.GET.get('fecha_inicio')
+        fecha_fin_str = request.GET.get('fecha_fin')
+        rutas_filter = request.GET.getlist('rutas')
+        estados_filter = request.GET.getlist('estados')
 
-    # Usamos select_related para un rendimiento óptimo. Esto genera un LEFT OUTER JOIN
-    # permitiendo acceder a los datos de pago solo si existen, sin excluir comisiones.
-    base_queryset = models.Comision.objects.exclude(estado='Consolidada').select_related('pagos')
+        base_queryset = models.Comision.objects.exclude(estado='Consolidada').select_related('pagos')
 
-    # CORRECCIÓN: Se filtra por 'mes_pago' para incluir todas las comisiones (pagadas o no) en el rango.
-    # Esto soluciona el problema del excel en blanco y maneja correctamente rangos de varios meses.
-    if fecha_inicio_str and fecha_fin_str:
-        fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
-        fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
-        base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
-    
-    if rutas_filter:
-        base_queryset = base_queryset.filter(ruta__in=rutas_filter)
-    if estados_filter:
-        base_queryset = base_queryset.filter(estado__in=estados_filter)
-
-    # 2. Selección de campos optimizada, incluyendo la 'fecha_pago'
-    comisiones_a_exportar = base_queryset.order_by('pk').values(
-        'mes_pago',
-        'mes_liquidacion',
-        'pagos__fecha_pago', # <-- CAMPO: Fecha de pago (será None si no está pagada)
-        'asesor_identificador',
-        'ruta',
-        'idpos',
-        'punto_de_venta',
-        'producto',
-        'iccid',
-        'min',
-        'comision_final',
-        'estado',
-        'pagos__metodos_pago',
-        'fecha_carga'
-    )
-
-    # 3. Conversión a DataFrame usando iterator() para eficiencia de memoria
-    # Esto es clave para la velocidad en reportes grandes.
-    df = pd.DataFrame.from_records(comisiones_a_exportar.iterator())
-
-    # 4. Procesamiento y renombrado de columnas
-    if not df.empty:
-        df.rename(columns={
-            'mes_pago': 'Mes Pago',
-            'mes_liquidacion': 'Mes Liquidación',
-            'pagos__fecha_pago': 'Fecha de Pago', # <-- NUEVA COLUMNA
-            'asesor_identificador': 'Asesor',
-            'ruta': 'Ruta',
-            'idpos': 'ID POS',
-            'punto_de_venta': 'Punto de Venta',
-            'producto': 'Producto',
-            'iccid': 'ICCID',
-            'min': 'MIN',
-            'comision_final': 'Valor Comisión',
-            'estado': 'Estado',
-            'pagos__metodos_pago': 'Metodos de Pago',
-            'fecha_carga': 'Fecha de Carga Original'
-        }, inplace=True)
-
-        # Formateo de todas las columnas de fecha, manejando valores nulos (NaT)
-        for col in ['Mes Pago', 'Mes Liquidación', 'Fecha de Pago']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d')
-        df['Fecha de Carga Original'] = pd.to_datetime(df['Fecha de Carga Original']).dt.strftime('%Y-%m-%d %H:%M')
+        if fecha_inicio_str and fecha_fin_str:
+            fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
+            fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
+            base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
         
-        # Convertir el JSON de métodos de pago a un string legible
-        if 'Metodos de Pago' in df.columns:
-            df['Metodos de Pago'] = df['Metodos de Pago'].apply(
-                lambda x: ', '.join([f"{k}: {v}" for k, v in x.items()]) if isinstance(x, dict) else ''
-            )
-
-        # Orden final de las columnas, incluyendo la nueva
-        columnas_ordenadas = [
+        if rutas_filter:
+            base_queryset = base_queryset.filter(ruta__in=rutas_filter)
+        if estados_filter:
+            base_queryset = base_queryset.filter(estado__in=estados_filter)
+        
+        # 2. Preparación de la respuesta HTTP para XLSX
+        filename = f"Reporte_Comisiones_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        response = HttpResponse(
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+        
+        # 3. Creación del Excel en modo "write-only" para bajo consumo de memoria
+        # ¡Importante! Asegúrate de tener 'openpyxl' instalado en producción: pip install openpyxl
+        wb = Workbook(write_only=True)
+        ws = wb.create_sheet("Detalle Comisiones")
+        
+        # Escribimos la fila de encabezados
+        column_headers = [
             'Mes Pago', 'Mes Liquidación', 'Fecha de Pago', 'Asesor', 'Ruta', 'ID POS',
             'Punto de Venta', 'Producto', 'ICCID', 'MIN', 'Valor Comisión', 'Estado', 
             'Metodos de Pago', 'Fecha de Carga Original'
         ]
-        # Asegurarnos de que solo se usan columnas que existen en el DataFrame
-        df = df[[col for col in columnas_ordenadas if col in df.columns]]
+        ws.append(column_headers)
 
-    # 5. Creación del archivo Excel en memoria
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='Detalle Comisiones', index=False)
-    output.seek(0)
+        # Usamos .iterator() para un consumo de memoria mínimo en la base de datos
+        comisiones = base_queryset.order_by('pk').iterator()
 
-    # 6. Preparación de la respuesta HTTP
-    filename = f"Reporte_Comisiones_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-    response = HttpResponse(
-        output,
-        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        for comision in comisiones:
+            # Procesamos los métodos de pago si existen
+            metodos_pago_str = ''
+            if comision.pagos and comision.pagos.metodos_pago and isinstance(comision.pagos.metodos_pago, dict):
+                metodos_pago_str = ', '.join([f"{k}: {v}" for k, v in comision.pagos.metodos_pago.items()])
 
-    return response
+            # Creamos la lista de datos para la fila
+            row_data = [
+                comision.mes_pago,
+                comision.mes_liquidacion,
+                comision.pagos.fecha_pago if comision.pagos else None,
+                comision.asesor_identificador,
+                comision.ruta,
+                comision.idpos,
+                comision.punto_de_venta,
+                comision.producto,
+                comision.iccid,
+                comision.min,
+                comision.comision_final,
+                comision.estado,
+                metodos_pago_str,
+                comision.fecha_carga.strftime('%Y-%m-%d %H:%M') if comision.fecha_carga else None
+            ]
+            # Escribimos la fila directamente en el archivo
+            ws.append(row_data)
 
+        # Guardamos el libro de trabajo virtual directamente en la respuesta HTTP
+        wb.save(response)
+
+        logger.info(f"Reporte XLSX '{filename}' generado y enviado exitosamente.")
+        return response
+
+    except Exception as e:
+        logger.error(f"Error al generar el reporte de Excel: {e}", exc_info=True)
+        return JsonResponse(
+            {'error': 'Ocurrió un error inesperado al generar el archivo.', 'details': str(e)}, 
+            status=500
+        )
 
 
 @api_view(['GET', 'POST'])
