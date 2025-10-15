@@ -794,33 +794,39 @@ def reporte_general_view(request):
     return Response(data)
 
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required # El decorador original era 'asesor_permission_required', lo mantengo. Si es para admin, podría ser otro.
 def exportar_reporte_excel(request):
     """
     Genera y devuelve un archivo Excel con el detalle de las comisiones filtradas.
+    Esta versión está optimizada para mayor velocidad y corrige el filtrado por fechas.
     """
-    # 1. Lógica de filtrado (CORREGIDA)
-    # Se utiliza request.GET en lugar de request.query_params para compatibilidad.
+    # 1. Lógica de filtrado mejorada
     fecha_inicio_str = request.GET.get('fecha_inicio')
     fecha_fin_str = request.GET.get('fecha_fin')
     rutas_filter = request.GET.getlist('rutas')
     estados_filter = request.GET.getlist('estados')
 
+    # Usamos select_related para un rendimiento óptimo. Esto genera un LEFT OUTER JOIN
+    # permitiendo acceder a los datos de pago solo si existen, sin excluir comisiones.
     base_queryset = models.Comision.objects.exclude(estado='Consolidada').select_related('pagos')
 
+    # CORRECCIÓN: Se filtra por 'mes_pago' para incluir todas las comisiones (pagadas o no) en el rango.
+    # Esto soluciona el problema del excel en blanco y maneja correctamente rangos de varios meses.
     if fecha_inicio_str and fecha_fin_str:
         fecha_inicio = datetime.strptime(fecha_inicio_str, '%Y-%m-%d').date()
         fecha_fin = datetime.strptime(fecha_fin_str, '%Y-%m-%d').date()
         base_queryset = base_queryset.filter(mes_pago__range=[fecha_inicio, fecha_fin])
+    
     if rutas_filter:
         base_queryset = base_queryset.filter(ruta__in=rutas_filter)
     if estados_filter:
         base_queryset = base_queryset.filter(estado__in=estados_filter)
 
-    # 2. Seleccionamos los campos para el Excel
-    comisiones_a_exportar = base_queryset.values(
+    # 2. Selección de campos optimizada, incluyendo la 'fecha_pago'
+    comisiones_a_exportar = base_queryset.order_by('pk').values(
         'mes_pago',
         'mes_liquidacion',
+        'pagos__fecha_pago', # <-- CAMPO: Fecha de pago (será None si no está pagada)
         'asesor_identificador',
         'ruta',
         'idpos',
@@ -830,19 +836,20 @@ def exportar_reporte_excel(request):
         'min',
         'comision_final',
         'estado',
-        'pagos__metodos_pago', # <-- Accedemos al JSONField del pago relacionado
+        'pagos__metodos_pago',
         'fecha_carga'
     )
 
-    # 3. Convertimos a DataFrame
-    df = pd.DataFrame.from_records(comisiones_a_exportar)
+    # 3. Conversión a DataFrame usando iterator() para eficiencia de memoria
+    # Esto es clave para la velocidad en reportes grandes.
+    df = pd.DataFrame.from_records(comisiones_a_exportar.iterator())
 
     # 4. Procesamiento y renombrado de columnas
     if not df.empty:
-        # Renombramos columnas
         df.rename(columns={
             'mes_pago': 'Mes Pago',
             'mes_liquidacion': 'Mes Liquidación',
+            'pagos__fecha_pago': 'Fecha de Pago', # <-- NUEVA COLUMNA
             'asesor_identificador': 'Asesor',
             'ruta': 'Ruta',
             'idpos': 'ID POS',
@@ -856,32 +863,35 @@ def exportar_reporte_excel(request):
             'fecha_carga': 'Fecha de Carga Original'
         }, inplace=True)
 
-        # Formateamos las fechas
-        for col in ['Mes Pago', 'Mes Liquidación']:
-            df[col] = pd.to_datetime(df[col]).dt.strftime('%Y-%m-%d')
+        # Formateo de todas las columnas de fecha, manejando valores nulos (NaT)
+        for col in ['Mes Pago', 'Mes Liquidación', 'Fecha de Pago']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d')
         df['Fecha de Carga Original'] = pd.to_datetime(df['Fecha de Carga Original']).dt.strftime('%Y-%m-%d %H:%M')
         
         # Convertir el JSON de métodos de pago a un string legible
-        df['Metodos de Pago'] = df['Metodos de Pago'].apply(
-            lambda x: ', '.join([f"{k}: {v}" for k, v in x.items()]) if isinstance(x, dict) else ''
-        )
+        if 'Metodos de Pago' in df.columns:
+            df['Metodos de Pago'] = df['Metodos de Pago'].apply(
+                lambda x: ', '.join([f"{k}: {v}" for k, v in x.items()]) if isinstance(x, dict) else ''
+            )
 
-        # Orden final de las columnas
+        # Orden final de las columnas, incluyendo la nueva
         columnas_ordenadas = [
-            'Mes Pago', 'Mes Liquidación', 'Asesor', 'Ruta', 'ID POS',
+            'Mes Pago', 'Mes Liquidación', 'Fecha de Pago', 'Asesor', 'Ruta', 'ID POS',
             'Punto de Venta', 'Producto', 'ICCID', 'MIN', 'Valor Comisión', 'Estado', 
             'Metodos de Pago', 'Fecha de Carga Original'
         ]
+        # Asegurarnos de que solo se usan columnas que existen en el DataFrame
         df = df[[col for col in columnas_ordenadas if col in df.columns]]
 
-    # 5. Creamos el archivo Excel en memoria
+    # 5. Creación del archivo Excel en memoria
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Detalle Comisiones', index=False)
     output.seek(0)
 
-    # 6. Preparamos la respuesta HTTP
-    filename = f"Reporte_Comisiones_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    # 6. Preparación de la respuesta HTTP
+    filename = f"Reporte_Comisiones_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
     response = HttpResponse(
         output,
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -889,6 +899,8 @@ def exportar_reporte_excel(request):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
     return response
+
+
 
 @api_view(['GET', 'POST'])
 @asesor_permission_required# ¡Protege esta vista! Solo los admins deben poder cambiar esto.

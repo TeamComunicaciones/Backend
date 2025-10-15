@@ -1,5 +1,3 @@
-# comisiones/tasks.py
-
 import pandas as pd
 import numpy as np
 from celery import shared_task
@@ -66,7 +64,7 @@ El equipo de Tu App
             subject,
             body,
             settings.DEFAULT_FROM_EMAIL, # Remitente
-            [user.email],               # Destinatario(s)
+            [user.email],                  # Destinatario(s)
             fail_silently=False,
         )
         logger.info(f"Email de notificación enviado a {user.email} para el usuario ID {user_id}.")
@@ -91,38 +89,31 @@ def _get_fecha_corte_helper():
         return 1
 
 
-# ---- INICIO: FUNCIÓN HELPER PARA VENCER POR INACTIVIDAD (CORREGIDA) ----
+# ---- INICIO: FUNCIÓN HELPER PARA VENCER POR INACTIVIDAD (CORREGIDA Y MEJORADA) ----
 def _vencer_por_inactividad_helper(mes_de_referencia):
     """
-    Lógica centralizada para vencer comisiones de PDV inactivos durante el ciclo de pago anterior.
-    El ciclo se define por el 'dia_corte' guardado en la configuración.
-    
-    :param mes_de_referencia: Un objeto date que pertenece al mes cuyo ciclo acaba de terminar.
+    Lógica para vencer comisiones de PDV inactivos durante el ciclo de pago anterior.
+    DEVUELVE: Una tupla (mensaje_string, lista_pdv_activos).
     """
     dia_corte = _get_fecha_corte_helper()
     
-    # --- LÓGICA DE CÁLCULO DE PERÍODO CORREGIDA ---
+    # --- Lógica de cálculo de período ---
     try:
         if dia_corte == 1:
-            # Si el corte es el día 1, el ciclo es el mes natural de referencia.
             inicio_periodo = mes_de_referencia.replace(day=1)
             last_day = monthrange(mes_de_referencia.year, mes_de_referencia.month)[1]
             fin_periodo = mes_de_referencia.replace(day=last_day)
         else:
-            # Si el corte es otro día (ej. 25), el ciclo va del 25 del mes anterior al 24 del mes de referencia.
             dia_fin_periodo = min(dia_corte - 1, monthrange(mes_de_referencia.year, mes_de_referencia.month)[1])
             fin_periodo = mes_de_referencia.replace(day=dia_fin_periodo)
-            
             mes_anterior = mes_de_referencia - relativedelta(months=1)
             dia_inicio_periodo = min(dia_corte, monthrange(mes_anterior.year, mes_anterior.month)[1])
             inicio_periodo = mes_anterior.replace(day=dia_inicio_periodo)
-            
     except ValueError:
-        logger.error("Error al calcular las fechas del período. Revisa el día de corte.")
-        return "Error en cálculo de fechas."
-    # --- FIN: LÓGICA DE CÁLCULO DE PERÍODO ---
+        error_msg = "Error al calcular las fechas del período. Revisa el día de corte."
+        logger.error(error_msg)
+        return (error_msg, []) # Devolver tupla en caso de error
 
-    # Convertir a datetimes timezone-aware para evitar warnings y asegurar precisión
     inicio_dt = timezone.make_aware(datetime.combine(inicio_periodo, dt_time.min))
     fin_dt = timezone.make_aware(datetime.combine(fin_periodo, dt_time.max))
 
@@ -131,27 +122,27 @@ def _vencer_por_inactividad_helper(mes_de_referencia):
 
     try:
         with transaction.atomic():
-            # 1. Encontrar PDV que SÍ tuvieron pagos en el período
+            # 1. Encontrar PDV que SÍ tuvieron pagos en el período (PDV ACTIVOS)
             pdv_con_pagos = models.PagoComision.objects.filter(
                 fecha_pago__range=[inicio_dt, fin_dt]
             ).values_list('idpos', flat=True).distinct()
-            pdv_con_pagos_set = set(pdv_con_pagos)
-            logger.info(f"HELPER: Se encontraron {len(pdv_con_pagos_set)} PDV con pagos en el período.")
+            pdv_activos_set = set(pdv_con_pagos)
+            logger.info(f"HELPER: Se encontraron {len(pdv_activos_set)} PDV ACTIVOS en el período.")
 
             # 2. Encontrar TODOS los PDV que tienen comisiones pendientes o acumuladas
             pdv_con_comisiones_pendientes = models.Comision.objects.filter(
                 estado__in=['Pendiente', 'Acumulada']
             ).values_list('idpos', flat=True).distinct()
             pdv_con_comisiones_pendientes_set = set(pdv_con_comisiones_pendientes)
-            logger.info(f"HELPER: Se encontraron {len(pdv_con_comisiones_pendientes_set)} PDV con comisiones por pagar en total.")
             
-            # 3. Identificar PDV inactivos (los que tienen deuda pero no hicieron pagos en el período)
-            pdv_inactivos = list(pdv_con_comisiones_pendientes_set - pdv_con_pagos_set)
+            # 3. Identificar PDV inactivos (tienen deuda pero NO hicieron pagos)
+            pdv_inactivos = list(pdv_con_comisiones_pendientes_set - pdv_activos_set)
 
             if not pdv_inactivos:
-                mensaje = f"HELPER: No se encontraron PDV inactivos para el período."
+                mensaje = "HELPER: No se encontraron PDV inactivos para el período."
                 logger.info(mensaje)
-                return mensaje
+                # Devolvemos la lista de activos que ya calculamos
+                return (mensaje, list(pdv_activos_set))
 
             # 4. Actualizar las comisiones de los PDV inactivos
             num_actualizadas = models.Comision.objects.filter(
@@ -161,13 +152,14 @@ def _vencer_por_inactividad_helper(mes_de_referencia):
 
             mensaje_final = f"HELPER: Se actualizaron {num_actualizadas} comisiones de {len(pdv_inactivos)} PDV a 'Vencida por no visita'."
             logger.info(mensaje_final)
-            return mensaje_final
+            # Devolvemos el mensaje Y la lista de PDV activos para el siguiente paso
+            return (mensaje_final, list(pdv_activos_set))
 
     except Exception as e:
         mensaje_error = f"HELPER: Error al vencer comisiones por inactividad: {e}"
         logger.error(mensaje_error, exc_info=True)
-        return mensaje_error
-# ---- FIN: FUNCIÓN HELPER CORREGIDA ----
+        return (mensaje_error, []) # Devolver tupla en caso de error
+# ---- FIN: FUNCIÓN HELPER CORREGIDA Y MEJORADA ----
 
 
 @shared_task
@@ -176,14 +168,14 @@ def procesar_archivo_comisiones(file_path, user_id):
     Tarea de Celery para procesar un archivo Excel de comisiones y notificar por email.
     """
     try:
-        # ... (Configuración de locale y lectura de Excel sin cambios)
+        # Configuración de locale y lectura de Excel
         try:
             locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
         except locale.Error:
             locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
         sheets_dict = pd.read_excel(file_path, sheet_name=None, dtype=str)
         
-        # --- LÓGICA DE VENCIMIENTO CON ORDEN CORREGIDO ---
+        # --- LÓGICA DE VENCIMIENTO CON ORDEN Y FILTRO CORREGIDOS ---
         first_sheet_name = next(iter(sheets_dict))
         df_for_month_check = sheets_dict[first_sheet_name]
         
@@ -198,22 +190,34 @@ def procesar_archivo_comisiones(file_path, user_id):
             logger.info(f"Último mes de liquidación en la BD: {ultimo_mes_registrado.strftime('%Y-%m')}")
             
             if mes_nuevo_fecha > ultimo_mes_registrado:
-                # PASO 1: Vencer por inactividad PRIMERO
-                logger.info("El mes del archivo es nuevo. Ejecutando lógica de vencimiento por inactividad para el ciclo anterior...")
-                resultado_inactividad = _vencer_por_inactividad_helper(ultimo_mes_registrado)
+                # PASO 1: Vencer por inactividad PRIMERO. Capturamos ambos resultados.
+                logger.info("El mes del archivo es nuevo. Ejecutando lógica de vencimiento...")
+                
+                resultado_inactividad, pdv_activos_del_ciclo = _vencer_por_inactividad_helper(ultimo_mes_registrado)
                 logger.info(f"Resultado del vencimiento por inactividad: {resultado_inactividad}")
                 
-                # PASO 2: Vencer por cambio de mes DESPUÉS
-                logger.warning(f"Venciendo comisiones restantes por cambio de mes.")
-                with transaction.atomic():
-                    num_actualizadas = models.Comision.objects.filter(estado__in=['Pendiente', 'Acumulada']).update(estado='Vencida', producto='Vencida por cambio de mes')
-                logger.info(f"Se actualizaron {num_actualizadas} comisiones a 'Vencida por cambio de mes'.")
+                # PASO 2: Vencer por cambio de mes DESPUÉS, USANDO LA LISTA DE PDV ACTIVOS.
+                logger.warning(f"Venciendo comisiones restantes de PDV ACTIVOS por cambio de mes.")
+                
+                if pdv_activos_del_ciclo: # Solo ejecutar si hubo PDV activos
+                    with transaction.atomic():
+                        # AÑADIMOS EL FILTRO 'idpos__in'
+                        num_actualizadas = models.Comision.objects.filter(
+                            estado__in=['Pendiente', 'Acumulada'],
+                            idpos__in=pdv_activos_del_ciclo
+                        ).update(
+                            estado='Vencida', 
+                            producto='Vencida por cambio de mes'
+                        )
+                    logger.info(f"Se actualizaron {num_actualizadas} comisiones de PDV activos a 'Vencida por cambio de mes'.")
+                else:
+                    logger.info("No hubo PDV activos en el ciclo anterior para vencer por cambio de mes.")
 
         else:
             logger.info("No hay comisiones previas. Se omite la validación de vencimiento.")
-        # --- FIN: LÓGICA DE VENCIMIENTO ---
+        # --- FIN: LÓGICA DE VENCIMIENTO CORREGIDA ---
 
-        # ... (El resto del procesamiento del archivo continúa exactamente igual)
+        # El resto del procesamiento del archivo continúa
         all_asesores_excel = set()
         for sheet_name, df in sheets_dict.items():
             if 'PRIM_LLAMADA_ACTIVACION' in df.columns:
@@ -284,7 +288,7 @@ def procesar_archivo_comisiones(file_path, user_id):
         return f"El proceso falló: {str(e)}"
     
     finally:
-        # ... (Limpieza del archivo sin cambios)
+        # Limpieza del archivo
         locale.setlocale(locale.LC_TIME, '')
         if os.path.exists(file_path):
             intentos = 5
@@ -312,10 +316,14 @@ def vencer_comisiones_por_inactividad():
 
     if today.day == dia_corte:
         logger.info(f"Hoy es día {dia_corte}, el día de corte. Ejecutando vencimiento por inactividad.")
-        mes_de_referencia = today.replace(day=1)
-        return _vencer_por_inactividad_helper(mes_de_referencia)
+        # El mes de referencia para el ciclo que acaba de terminar es el mes actual.
+        # El helper calculará el período correcto (p.ej., del día de corte del mes pasado a ayer)
+        mes_de_referencia = today.replace(day=1) 
+        
+        # La tarea programada solo necesita ejecutar el helper, no necesita la lista de pdv activos
+        mensaje_resultado, _ = _vencer_por_inactividad_helper(mes_de_referencia)
+        return mensaje_resultado
     else:
         mensaje = f"Hoy es día {today.day}. La tarea solo se ejecuta el día {dia_corte} de cada mes. No se hace nada."
         logger.info(mensaje)
         return mensaje
-
