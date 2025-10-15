@@ -830,7 +830,6 @@ def exportar_reporte_excel(request):
         )
         
         # 3. Creación del Excel en modo "write-only" para bajo consumo de memoria
-        # ¡Importante! Asegúrate de tener 'openpyxl' instalado en producción: pip install openpyxl
         wb = Workbook(write_only=True)
         ws = wb.create_sheet("Detalle Comisiones")
         
@@ -845,17 +844,23 @@ def exportar_reporte_excel(request):
         # Usamos .iterator() para un consumo de memoria mínimo en la base de datos
         comisiones = base_queryset.order_by('pk').iterator()
 
+        # Función auxiliar para convertir datetimes "aware" a "naive"
+        def make_naive(value):
+            if hasattr(value, 'tzinfo') and value.tzinfo is not None:
+                return value.replace(tzinfo=None)
+            return value
+
         for comision in comisiones:
             # Procesamos los métodos de pago si existen
             metodos_pago_str = ''
             if comision.pagos and comision.pagos.metodos_pago and isinstance(comision.pagos.metodos_pago, dict):
                 metodos_pago_str = ', '.join([f"{k}: {v}" for k, v in comision.pagos.metodos_pago.items()])
 
-            # Creamos la lista de datos para la fila
+            # Creamos la lista de datos para la fila, asegurando que los datetimes sean "naive"
             row_data = [
-                comision.mes_pago,
-                comision.mes_liquidacion,
-                comision.pagos.fecha_pago if comision.pagos else None,
+                make_naive(comision.mes_pago),
+                make_naive(comision.mes_liquidacion),
+                make_naive(comision.pagos.fecha_pago if comision.pagos else None),
                 comision.asesor_identificador,
                 comision.ruta,
                 comision.idpos,
@@ -866,7 +871,7 @@ def exportar_reporte_excel(request):
                 comision.comision_final,
                 comision.estado,
                 metodos_pago_str,
-                comision.fecha_carga.strftime('%Y-%m-%d %H:%M') if comision.fecha_carga else None
+                make_naive(comision.fecha_carga)
             ]
             # Escribimos la fila directamente en el archivo
             ws.append(row_data)
