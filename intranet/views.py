@@ -77,7 +77,40 @@ from .serializers import (ActaEntregaSerializer, ComisionSerializer,
 from .services import process_sales_report_file
 from .tasks import procesar_archivo_comisiones
 
+def token_required(view_func):
+    """
+    Decorador que verifica que el token JWT sea válido y adjunta el usuario al request.
+    No comprueba permisos específicos.
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return Response({'error': 'Token no proporcionado o con formato incorrecto.'}, status=401)
+        
+        try:
+            token = auth_header.split(' ')[1]
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+            
+            user_id = payload.get('id')
+            if not user_id:
+                raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
 
+            user = User.objects.get(id=user_id)
+            request.user = user # Asignamos el usuario al request
+            
+        except jwt.ExpiredSignatureError:
+            return Response({'error': 'El token ha expirado.'}, status=401)
+        except (jwt.InvalidTokenError, User.DoesNotExist, AuthenticationFailed) as e:
+            return Response({'error': f'Autenticación fallida: {str(e)}'}, status=401)
+        except Exception as e:
+            return Response({'error': f'Ocurrió un error interno: {str(e)}'}, status=500)
+            
+        # Si todo está bien, ejecutamos la vista original
+        return view_func(request, *args, **kwargs)
+        
+    return wrapper
 
 def asesor_permission_required(view_func):
     @wraps(view_func)
@@ -1093,93 +1126,115 @@ def pdv_por_ruta_view(request):
 
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
+@token_required # The decorator handles authentication and provides request.user
 def formulas_prices(request, id=None):
-    try:
-        auth_header = request.headers.get('Authorization')
-        if auth_header:
-            token = auth_header.split(' ')[1]
-            if not token:
-                raise AuthenticationFailed('You must be logged in.')
-            else:
-                try:
-                    payload = jwt.decode(token, 'secret', algorithms='HS256')
-                    user_id = User.objects.get(username=payload['id'])
-                except jwt.ExpiredSignatureError:
-                    raise AuthenticationFailed('You must be logged in.')
+    """
+    Manages CRUD operations for Formulas.
+    Authentication is handled by the @token_required decorator.
+    """
+    
+    # --- GET Method: Fetch one or all formulas ---
+    if request.method == 'GET':
+        if id is not None:
+            # Fetch a single formula by its ID
+            try:
+                formula = models.Formula.objects.select_related('price_id').get(id=id)
+                response_data = {
+                    'id': formula.id, 
+                    'name': formula.nombre, 
+                    'price': formula.price_id.permiso if formula.price_id else None,
+                    'price_id': formula.price_id.id if formula.price_id else None,
+                    'formula': formula.formula
+                }
+                return Response({'data': response_data})
+            except models.Formula.DoesNotExist:
+                return Response({'error': f'No existe una fórmula con el ID {id}'}, status=404)
         else:
-            raise AuthenticationFailed('Authentication token not found.')
-        
-        if request.method == 'GET':
-            if id is not None:
+            # Fetch all formulas
+            formulas = models.Formula.objects.select_related('price_id').all().order_by('nombre')
+            data_list = []
+            for item in formulas:
                 try:
-                    data = models.Formula.objects.get(id=id)
-                except:
-                    raise AuthenticationFailed(f'There is no formula with ID {id}')
-                return Response({
-                    'data': {
-                        'id': data.id, 
-                        'name': data.nombre, 
-                        'price': data.price_id.permiso,
-                        'formula': data.formula
-                        }
-                    })
-            else:
-                data = models.Formula.objects.all()
-                data_list = [{
-                                'id': i.id, 
-                                'name': i.nombre, 
-                                'price': i.price_id.permiso,
-                                'formula': ' '.join(ast.literal_eval(i.formula))
-                            } for i in data]
-                
-                data_list = sorted(data_list, key=lambda x: x['name'].lower())
-                return Response({'data':data_list})
-        elif request.method == 'POST':
-            name = request.data['name']
-            price = request.data['price']
-            formula = request.data['formula']
-            try:
-                price = models.Permisos_precio.objects.get(id=price)
-            except: 
-                pass
-            models.Formula.objects.create(nombre=name, price_id=price, formula=formula, usuario=user_id)
-            return Response({'data':'successful creation'})
-        elif request.method == 'PUT':
-            try:
-                if id is not None:
-                    name = request.data['name']
-                    price = request.data['price']
-                    formula = request.data['formula']
-                    formula = str(formula.split(' '))
-                    data = models.Formula.objects.get(id=id)
-                    data.nombre = name
-                    try:
-                        price = models.Permisos_precio.objects.get(id=price)
-                    except: 
-                        pass
-                    data.price_id = price
-                    data.formula = formula
-                    data.save()
-                    return Response({'data':'successful edit'})
-                else:
-                    return Response({'error': 'The id field is required'}, status=400)
-            except Exception as e:
-                    return Response({'error': e}, status=400)
-        elif request.method == 'DELETE':
-            if id is not None:
-                try:
-                    data = models.Formula.objects.get(id=id)
-                    data.delete()
-                    return Response({'data': f'The Formula with ID {id} was successfully removed'})
-                except models.Formula.DoesNotExist:
-                    return Response({'error': 'The Formula does not exist'}, status=404)
-                except Exception as e:
-                    return Response({'error': f'Could not delete Formula: {str(e)}'}, status=400)
+                    # Safely evaluate the string representation of a list
+                    formula_str = ' '.join(ast.literal_eval(item.formula)) if item.formula and item.formula.strip().startswith('[') else item.formula
+                except (ValueError, SyntaxError):
+                    # If it's not a list-like string, just use it as is
+                    formula_str = item.formula
 
-            else:
-                return Response({'error': 'The id field is required'}, status=400)
-    except Exception as e:
-        return Response({'error': e}, status=400)
+                data_list.append({
+                    'id': item.id, 
+                    'name': item.nombre, 
+                    'price': item.price_id.permiso if item.price_id else None,
+                    'price_id': item.price_id.id if item.price_id else None,
+                    'formula': formula_str
+                })
+            return Response({'data': data_list})
+
+    # --- POST Method: Create a new formula ---
+    elif request.method == 'POST':
+        name = request.data.get('name')
+        price_id = request.data.get('price')
+        formula_str = request.data.get('formula')
+
+        if not all([name, price_id, formula_str]):
+            return Response({'error': 'Los campos "name", "price" y "formula" son requeridos.'}, status=400)
+
+        try:
+            price_instance = models.Permisos_precio.objects.get(id=price_id)
+            
+            # The decorator provides request.user
+            new_formula = models.Formula.objects.create(
+                nombre=name, 
+                price_id=price_instance, 
+                formula=formula_str, 
+                usuario=request.user
+            )
+            return Response({'data': 'Creación exitosa', 'id': new_formula.id}, status=201)
+        except models.Permisos_precio.DoesNotExist:
+            return Response({'error': f'El precio con ID {price_id} no existe.'}, status=400)
+        except Exception as e:
+            return Response({'error': f'No se pudo crear la fórmula: {str(e)}'}, status=400)
+
+    # --- PUT Method: Update an existing formula ---
+    elif request.method == 'PUT':
+        if id is None:
+            return Response({'error': 'El id es requerido en la URL para actualizar.'}, status=400)
+
+        try:
+            instance = models.Formula.objects.get(id=id)
+            
+            instance.nombre = request.data.get('name', instance.nombre)
+            instance.formula = request.data.get('formula', instance.formula)
+            
+            # Update related price if a new one is provided
+            new_price_id = request.data.get('price')
+            if new_price_id:
+                try:
+                    price_instance = models.Permisos_precio.objects.get(id=new_price_id)
+                    instance.price_id = price_instance
+                except models.Permisos_precio.DoesNotExist:
+                    return Response({'error': f'El nuevo precio con ID {new_price_id} no existe.'}, status=400)
+            
+            instance.save()
+            return Response({'data': 'Edición exitosa'})
+        except models.Formula.DoesNotExist:
+            return Response({'error': f'La fórmula con ID {id} no existe.'}, status=404)
+        except Exception as e:
+            return Response({'error': f'No se pudo actualizar la fórmula: {str(e)}'}, status=400)
+
+    # --- DELETE Method: Remove a formula ---
+    elif request.method == 'DELETE':
+        if id is None:
+            return Response({'error': 'El id es requerido en la URL para eliminar.'}, status=400)
+            
+        try:
+            formula_to_delete = models.Formula.objects.get(id=id)
+            formula_to_delete.delete()
+            return Response({'data': f'La fórmula con ID {id} fue eliminada exitosamente.'})
+        except models.Formula.DoesNotExist:
+            return Response({'error': f'La fórmula con ID {id} no existe.'}, status=404)
+        except Exception as e:
+            return Response({'error': f'No se pudo eliminar la fórmula: {str(e)}'}, status=400)
     
     
 
@@ -1345,175 +1400,156 @@ def actas_entrega(request, id=None):
         return Response({'error': str(e)}, status=500)
 
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
+@token_required # Apply the decorator to handle authentication
 def variables_prices(request, id=None):
-    # La autenticación se mantiene igual
-    auth_header = request.headers.get('Authorization')
-    if auth_header:
-        token = auth_header.split(' ')[1]
-        if not token:
-            raise AuthenticationFailed('You must be logged in.')
-        else:
-            try:
-                payload = jwt.decode(token, 'secret', algorithms='HS256')
-            except jwt.ExpiredSignatureError:
-                raise AuthenticationFailed('You must be logged in.')
-    else:
-        raise AuthenticationFailed('Authentication token not found.')
-    
-    # El método GET se mantiene igual
+    """
+    Manages CRUD operations for Variables.
+    Authentication is now handled by the @token_required decorator.
+    """
+
+    # --- GET Method: Fetch one or all variables ---
     if request.method == 'GET':
         if id is not None:
             try:
-                data = models.Variables_prices.objects.get(id=id)
+                data = models.Variables_prices.objects.select_related('price').get(id=id)
                 return Response({
                     'data': {
                         'id': data.id, 
                         'name': data.name, 
-                        'price': data.price.permiso,
+                        'price': data.price.permiso if data.price else None,
+                        'price_id': data.price.id if data.price else None,
                         'formula': data.formula
                     }
                 })
             except models.Variables_prices.DoesNotExist:
-                return Response({'error': f'There is no variable with ID {id}'}, status=404)
+                return Response({'error': f'No existe una variable con el ID {id}'}, status=404)
         else:
-            data = models.Variables_prices.objects.all()
+            data = models.Variables_prices.objects.select_related('price').all().order_by('name')
             data_list = [{
                 'id': i.id, 
                 'name': i.name, 
-                'price': i.price.permiso,
+                'price': i.price.permiso if i.price else None,
+                'price_id': i.price.id if i.price else None,
                 'formula': i.formula
             } for i in data]
-            data_list = sorted(data_list, key=lambda x: x['name'].lower())
-            return Response({'data':data_list})
+            return Response({'data': data_list})
 
-    # El método POST también se ha mejorado para manejar errores
+    # --- POST Method: Create a new variable ---
     elif request.method == 'POST':
         name = request.data.get('name')
         price_id = request.data.get('price')
         formula = request.data.get('formula')
+
+        if not all([name, price_id, formula]):
+             return Response({'error': 'Los campos "name", "price" y "formula" son requeridos.'}, status=400)
         
         try:
             price_instance = models.Permisos_precio.objects.get(id=price_id)
             models.Variables_prices.objects.create(name=name, price=price_instance, formula=formula)
-            return Response({'data': 'Variable created successfully'}, status=201)
+            return Response({'data': 'Variable creada exitosamente'}, status=201)
         except models.Permisos_precio.DoesNotExist:
-            return Response({'error': f'Price with ID {price_id} does not exist.'}, status=400)
+            return Response({'error': f'El precio con ID {price_id} no existe.'}, status=400)
         except Exception as e:
-            return Response({'error': f'An unexpected error occurred: {str(e)}'}, status=400)
+            return Response({'error': f'Ocurrió un error inesperado: {str(e)}'}, status=400)
 
-    # --- BLOQUE PUT CORREGIDO Y MEJORADO ---
+    # --- PUT Method: Update an existing variable ---
     elif request.method == 'PUT':
         if id is None:
-            return Response({'error': 'Variable ID is required for updating.'}, status=400)
+            return Response({'error': 'El ID de la variable es requerido para actualizar.'}, status=400)
         
         try:
-            # 1. Obtenemos la instancia de la variable que vamos a actualizar
             variable_instance = models.Variables_prices.objects.get(id=id)
-
-            # 2. Obtenemos los datos del request de forma segura
-            name = request.data.get('name', variable_instance.name)
-            price_id = request.data.get('price', variable_instance.price.id)
-            formula = request.data.get('formula', variable_instance.formula)
-
-            # 3. VALIDAMOS que el objeto Price relacionado exista ANTES de asignar
-            try:
-                price_instance = models.Permisos_precio.objects.get(id=price_id)
-            except models.Permisos_precio.DoesNotExist:
-                # Si no existe, devolvemos un error claro al frontend. NO MÁS 500.
-                return Response({'error': f'Price with ID {price_id} does not exist.'}, status=400)
             
-            # 4. Actualizamos los campos de la instancia
-            variable_instance.name = name
-            variable_instance.formula = formula
-            variable_instance.price = price_instance # Asignamos el OBJETO, no el ID
+            variable_instance.name = request.data.get('name', variable_instance.name)
+            variable_instance.formula = request.data.get('formula', variable_instance.formula)
+
+            new_price_id = request.data.get('price')
+            if new_price_id:
+                try:
+                    price_instance = models.Permisos_precio.objects.get(id=new_price_id)
+                    variable_instance.price = price_instance
+                except models.Permisos_precio.DoesNotExist:
+                    return Response({'error': f'El precio con ID {new_price_id} no existe.'}, status=400)
             
-            # 5. Guardamos la instancia actualizada
             variable_instance.save()
-            
-            return Response({'data': 'Variable updated successfully'})
+            return Response({'data': 'Variable actualizada exitosamente'})
 
         except models.Variables_prices.DoesNotExist:
-            return Response({'error': f'Variable with ID {id} does not exist.'}, status=404)
+            return Response({'error': f'La variable con ID {id} no existe.'}, status=404)
         except Exception as e:
-            # Capturamos cualquier otro error inesperado para evitar un 500
-            return Response({'error': f'An unexpected error occurred: {str(e)}'}, status=500)
+            return Response({'error': f'Ocurrió un error inesperado: {str(e)}'}, status=500)
 
-    # El método DELETE se mantiene igual
+    # --- DELETE Method: Remove a variable ---
     elif request.method == 'DELETE':
         if id is not None:
             try:
                 data = models.Variables_prices.objects.get(id=id)
                 data.delete()
-                return Response({'data': f'The variable with ID {id} was successfully removed'})
+                return Response({'data': f'La variable con ID {id} fue eliminada exitosamente.'})
             except models.Variables_prices.DoesNotExist:
-                return Response({'error': 'The variable does not exist'}, status=404)
+                return Response({'error': 'La variable no existe.'}, status=404)
             except Exception as e:
-                return Response({'error': f'Could not delete variable: {str(e)}'}, status=400)
+                return Response({'error': f'No se pudo eliminar la variable: {str(e)}'}, status=400)
         else:
-            return Response({'error': 'The id field is required'}, status=400)
+            return Response({'error': 'El campo id es requerido en la URL.'}, status=400)
 
 @api_view(['GET', 'POST', 'PUT' ,'DELETE'])
+@token_required # <-- APLICA EL NUEVO DECORADOR
 def prices(request, id=None):
-    auth_header = request.headers.get('Authorization')
-    if auth_header:
-        token = auth_header.split(' ')[1]
-        if not token:
-            raise AuthenticationFailed('You must be logged in.')
-        else:
-            try:
-                payload = jwt.decode(token, 'secret', algorithms='HS256')
-            except jwt.ExpiredSignatureError:
-                raise AuthenticationFailed('You must be logged in.')
-    else:
-        raise AuthenticationFailed('Authentication token not found.')
+    # Ya no hay código de autenticación aquí. ¡Más limpio!
+    # Si la ejecución llega a este punto, el token es válido y request.user existe.
     
     if request.method == 'GET':
         if id is not None:
             try:
                 data = models.Permisos_precio.objects.get(id=id)
-            except:
-                raise AuthenticationFailed(f'There is no price with ID {id}')
-            return Response({'data': {'id': data.id, 'name': data.permiso, 'state': data.active}})
-        else:
-            data = models.Permisos_precio.objects.all()
-            data_list = [{'id': i.id, 'name': i.permiso, 'state': i.active} for i in data]
-            data_list = sorted(data_list, key=lambda x: x['name'].lower())
-            return Response({'data':data_list})
-    elif request.method == 'POST':
-        name = request.data['name']
-        state = request.data['state']
-        models.Permisos_precio.objects.create(permiso=name, active=state)
-        return Response({'data':'successful creation'})
-    elif request.method == 'PUT':
-        if id is not None:
-            name = request.data['name']
-            state = request.data['state']
-            if state == 'True' or state == 'true':
-                state = True
-            elif state == 'False' or state == 'false':
-                state = False
-            data = models.Permisos_precio.objects.get(id=id)
-            data.permiso = name
-            data.active = state
-            data.save()
-            return Response({'data':'successful edit'})
-        else:
-            return Response({'error': 'The id field is required'}, status=400)
-    elif request.method == 'DELETE':
-        if id is not None:
-            try:
-                data = models.Permisos_precio.objects.get(id=id)
-                data.delete()
-                return Response({'data': f'The price with ID {id} was successfully removed'})
+                return Response({'data': {'id': data.id, 'name': data.permiso, 'state': data.active}})
             except models.Permisos_precio.DoesNotExist:
-                return Response({'error': 'The price does not exist'}, status=404)
-            except Exception as e:
-                return Response({'error': f'Could not delete prices: {str(e)}'}, status=400)
-
+                return Response({'error': f'No existe un precio con el ID {id}'}, status=404)
         else:
-            return Response({'error': 'The id field is required'}, status=400)
+            data = models.Permisos_precio.objects.all().order_by('permiso')
+            data_list = [{'id': i.id, 'name': i.permiso, 'state': i.active} for i in data]
+            return Response({'data': data_list})
+
+    elif request.method == 'POST':
+        name = request.data.get('name')
+        state = request.data.get('state', False)
+        
+        if not name:
+            return Response({'error': 'El campo "name" es requerido'}, status=400)
+            
+        models.Permisos_precio.objects.create(permiso=name, active=state)
+        return Response({'data': 'Creación exitosa'}, status=201)
+
+    elif request.method == 'PUT':
+        if id is None:
+            return Response({'error': 'El id es requerido en la URL para actualizar'}, status=400)
+        
+        try:
+            instance = models.Permisos_precio.objects.get(id=id)
+            instance.permiso = request.data.get('name', instance.permiso)
+            
+            state_str = str(request.data.get('state', instance.active)).lower()
+            instance.active = state_str in ['true', '1']
+            
+            instance.save()
+            return Response({'data': 'Edición exitosa'})
+        except models.Permisos_precio.DoesNotExist:
+            return Response({'error': 'El precio no existe'}, status=404)
+
+    elif request.method == 'DELETE':
+        if id is None:
+            return Response({'error': 'El id es requerido en la URL para eliminar'}, status=400)
+            
+        try:
+            data = models.Permisos_precio.objects.get(id=id)
+            data.delete()
+            return Response({'data': f'El precio con ID {id} fue eliminado exitosamente'})
+        except models.Permisos_precio.DoesNotExist:
+            return Response({'error': 'El precio no existe'}, status=404)
         
 @api_view(['GET'])
+@token_required # 2. Aplica el decorador para manejar la autenticación
 def get_filtros_precios(request):
     try:
         try:
@@ -1521,14 +1557,10 @@ def get_filtros_precios(request):
         except locale.Error:
             locale.setlocale(locale.LC_TIME, 'es')
 
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return Response({'detail': 'Token no proporcionado.'}, status=401)
+        # 3. El decorador ya validó el token y nos da el usuario en request.user
+        usuario = request.user
         
-        token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-        usuario = User.objects.get(username=payload.get('id'))
-
+        # El resto de tu lógica se mantiene, ya que es correcta
         permisos_por_usuario = {
             '33333': ['Precio publico', 'Precio Fintech', 'Precio Addi'],
             '44444': ['Precio sub', 'Precio publico', 'Precio Fintech', 'Precio premium', 'Precio Addi'],
@@ -1542,46 +1574,26 @@ def get_filtros_precios(request):
             "Costo": "Costo", "Precio Adelantos Valle": "Adelantos Valle"
         }
 
-        # Inicializamos las variables que conformarán la respuesta
         lista_precios_final = []
         marcas = []
         fechas_validas_formateadas = []
 
-        # -- INICIO DE LA LÓGICA MODIFICADA --
-
+        # Usamos el username del usuario que nos dio el decorador
         if usuario.username in permisos_por_usuario:
-            # 1. Es un usuario con permisos especiales.
-            # Se calculan solo las listas de precios permitidas.
             listas_permitidas_ids = permisos_por_usuario[usuario.username]
             lista_precios_final = [{'id': id_lista, 'nombre': todas_las_listas_map[id_lista]} for id_lista in listas_permitidas_ids if id_lista in todas_las_listas_map]
-            
-            # 2. Para estos usuarios, los filtros de 'marcas' y 'fechas_validas' desaparecen.
-            # Dejamos las listas 'marcas' y 'fechas_validas_formateadas' vacías.
-            # El frontend interpretará una lista vacía como que no debe mostrar el filtro.
-
+        
         else:
-            # Es un usuario normal (no está en el diccionario de permisos).
-            # Se mantiene el comportamiento original.
-            
-            # 1. Se le asignan todas las listas de precios.
             lista_precios_final = [{'id': k, 'nombre': v} for k, v in todas_las_listas_map.items()]
-            
-            # 2. Se calcula el filtro de marcas.
             productos = models.Lista_precio.objects.values_list('producto', flat=True).distinct()
             marcas = sorted(list(set([p.split(' ')[0].upper() for p in productos if p])))
-            
-            # 3. Se calcula el filtro de fechas ("Variación a Fecha").
             cargas = models.Carga.objects.all().order_by('-fecha_carga')[:50]
             for carga in cargas:
                 fechas_validas_formateadas.append({
                     "valor": carga.id,
                     "texto": carga.fecha_carga.strftime("%d de %B de %Y - %H:%M")
                 })
-        
-        # -- FIN DE LA LÓGICA MODIFICADA --
 
-        # La respuesta es la misma para ambos casos, usando las variables que se llenaron
-        # en el bloque if/else.
         return Response({
             'listas_precios': lista_precios_final,
             'marcas': marcas,
@@ -1590,7 +1602,6 @@ def get_filtros_precios(request):
 
     except Exception as e:
         return Response({'detail': f'Error interno en get_filtros_precios: {str(e)}'}, status=500)
-
 
 
 def motor_de_evaluacion_recursivo(formula_string, price_list_id, context, mapa_variables, cache_variables):
@@ -1713,8 +1724,13 @@ def calculate_dynamic_total(equipo_sin_iva, kits):
     return equipo_sin_iva + iva_equipo + valor_sim + iva_sim + kit_total
 
 @api_view(['POST'])
+@token_required # 1. El decorador maneja la autenticación de forma segura
 def buscar_precios(request):
     try:
+        # 2. El usuario se obtiene del request gracias al decorador
+        usuario = request.user
+
+        # --- OBTENCIÓN DE FILTROS DEL FRONTEND ---
         filtros = request.data.get('filtros', {})
         listas_precios_nombres = filtros.get('listas_precios', [])
         marcas_seleccionadas = filtros.get('marcas', [])
@@ -1726,6 +1742,7 @@ def buscar_precios(request):
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
+        # --- CONSTRUCCIÓN DE QUERIES INICIALES ---
         productos_qs = models.Traducciones.objects.filter(active=True)
         if marcas_seleccionadas:
             productos_qs = productos_qs.filter(stok__iregex=r'(' + '|'.join(marcas_seleccionadas) + r')\s')
@@ -1734,6 +1751,7 @@ def buscar_precios(request):
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
         
+        # --- LÓGICA DE CARGA (FECHA) ---
         if carga_id_actual == 'todas':
             latest_price_ids_subquery = (
                 models.Lista_precio.objects
@@ -1762,12 +1780,13 @@ def buscar_precios(request):
             ).select_related('carga')
             fecha_actual_str = carga_actual.fecha_carga.strftime('%d de %B de %Y')
             
+        # --- FILTRADO Y PREPARACIÓN DE DATOS ---
         productos_lp_raw = precios_actuales_qs.values_list('producto', flat=True).distinct()
         producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
         
         if not stoks_encontrados_lp:
-            return Response({'data': [], 'fecha_actual': 'N/A'})
+            return Response({'data': [], 'fecha_actual': fecha_actual_str})
             
         precios_actuales_qs = precios_actuales_qs.filter(producto__in=stoks_encontrados_lp)
 
@@ -1785,50 +1804,36 @@ def buscar_precios(request):
         precios_anteriores_encontrados = models.Lista_precio.objects.filter(id__in=ids_anteriores_a_buscar)
         mapa_precios_anteriores = {p.id: p for p in precios_anteriores_encontrados}
 
-        all_cargas_ids = models.Lista_precio.objects.filter(
-            producto__in=stoks_encontrados_lp
-        ).values_list('carga_id', flat=True).distinct()
-
-        all_kits_data = models.Lista_precio.objects.filter(
-            carga_id__in=all_cargas_ids,
-            producto__in=stoks_encontrados_lp,
-            nombre__icontains='Kit'
-        ).exclude(nombre__icontains='Descuento Kit')
+        all_cargas_ids = models.Lista_precio.objects.filter(producto__in=stoks_encontrados_lp).values_list('carga_id', flat=True).distinct()
         
-        all_costos_data = models.Lista_precio.objects.filter(
-            carga_id__in=all_cargas_ids,
-            producto__in=stoks_encontrados_lp,
-            nombre='Costo'
-        )
-        all_descuentos_data = models.Lista_precio.objects.filter(
-            carga_id__in=all_cargas_ids,
-            producto__in=stoks_encontrados_lp,
-            nombre='descuento'
-        )
+        all_kits_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre__icontains='Kit').exclude(nombre__icontains='Descuento Kit')
+        all_costos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='Costo')
+        all_descuentos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='descuento')
         
         mapa_kits = defaultdict(list)
         mapa_costos = {}
         mapa_descuentos = {}
 
         for kit in all_kits_data:
-            key = (kit.producto.strip().lower(), kit.carga_id)
+            key = (normalize_string(kit.producto), kit.carga_id)
             mapa_kits[key].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
         
         for costo in all_costos_data:
-            key = (costo.producto.strip().lower(), costo.carga_id)
+            key = (normalize_string(costo.producto), costo.carga_id)
             mapa_costos[key] = costo.valor
 
         for descuento in all_descuentos_data:
-            key = (descuento.producto.strip().lower(), descuento.carga_id)
+            key = (normalize_string(descuento.producto), descuento.carga_id)
             mapa_descuentos[key] = descuento.valor
             
+        # --- PROCESAMIENTO FINAL Y CÁLCULOS ---
         new_data = []
         base_iva_excluido = Decimal('1095578')
         TASA_IVA = Decimal('0.19')
         
         for precio_actual in precios_actuales_con_anterior:
             prod_raw = precio_actual.producto
-            prod_lower = prod_raw.strip().lower()
+            prod_lower = normalize_string(prod_raw)
             nombre_lista = precio_actual.nombre
             carga_id = precio_actual.carga_id
             
@@ -1846,16 +1851,12 @@ def buscar_precios(request):
                         kit['valor'] = 0.0
                         break
             else:
-                # --- NUEVA LÓGICA ---
-                # Si está por debajo del umbral, la regla depende de la lista de precios
                 if nombre_lista.lower() == 'precio premium':
-                    # REGLA ESPECIAL: Para "premium", el Kit Premium es 0 si está bajo el umbral.
                     for kit in kits_data_to_send:
                         if kit.get('nombre', '').lower() == 'kit premium':
                             kit['valor'] = 0.0
                             break
                 else:
-                    # REGLA GENERAL: Para las demás listas (ej: "sub"), el IVA se representa en el Kit Premium.
                     iva_as_kit_premium = equipo_sin_iva_actual * TASA_IVA
                     kit_found = False
                     for kit in kits_data_to_send:
