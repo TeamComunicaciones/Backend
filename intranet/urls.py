@@ -84,5 +84,8 @@ urlpatterns = [
     path('admin/reporte-general/', views.reporte_general_view, name='reporte-general'),
     path('comisiones/consulta-agrupada/', views.consulta_agrupada_pdv_view, name='consulta-agrupada-pdv'),
     path('admin/exportar-reporte/', views.exportar_reporte_excel, name='exportar_reporte_excel'),
-    path('admin/fecha-corte/', views.fecha_corte_view, name='fecha_corte'), 
+    path('admin/fecha-corte/', views.fecha_corte_view, name='fecha_corte'),
+    path('admin/asesores/', views.asesor_list_create, name='asesor-list-create'),
+    path('admin/asesores/<int:pk>/', views.asesor_detail, name='asesor-detail'),
+    path('admin/asesores/<int:pk>/activar/', views.asesor_toggle_active, name='asesor-toggle-active'),
 ]

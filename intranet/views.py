@@ -77,6 +77,97 @@ from .serializers import (ActaEntregaSerializer, ComisionSerializer,
 from .services import process_sales_report_file
 from .tasks import procesar_archivo_comisiones
 
+from django.contrib.auth.models import User
+from .models import Permisos_usuarios, Perfil
+from .serializers import AsesorSerializer
+from .permissions import admin_permission_required # Asegúrate de importar tu decorador
+
+
+def _get_asesor_user_queryset():
+    """Helper para obtener solo usuarios con permiso de asesor."""
+    asesor_user_ids = Permisos_usuarios.objects.filter(
+        permiso__permiso='asesor_comisiones', 
+        tiene_permiso=True
+    ).values_list('user_id', flat=True)
+    
+    # Apuntamos a 'perfil' como en tu models.py
+    return User.objects.filter(id__in=asesor_user_ids).select_related('perfil')
+
+
+@api_view(['GET', 'POST'])
+@admin_permission_required
+def asesor_list_create(request):
+    """
+    GET: Lista todos los usuarios que SON asesores.
+    POST: Crea un nuevo usuario Asesor.
+    """
+    if request.method == 'GET':
+        asesores = _get_asesor_user_queryset()
+        serializer = AsesorSerializer(asesores, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        serializer = AsesorSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['PUT', 'DELETE'])
+@admin_permission_required
+def asesor_detail(request, pk):
+    """
+    PUT: Actualiza los datos de un asesor (username, email, ruta).
+    DELETE: Elimina un asesor.
+    """
+    try:
+        # Nos aseguramos de que solo podamos actuar sobre asesores
+        user = _get_asesor_user_queryset().get(pk=pk)
+    except User.DoesNotExist:
+        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_44_NOT_FOUND)
+
+    if request.method == 'PUT':
+        # Usamos partial=True para que se pueda actualizar solo la ruta si se desea
+        serializer = AsesorSerializer(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        user.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['PATCH'])
+@admin_permission_required
+def asesor_toggle_active(request, pk):
+    """
+    PATCH: Activa o desactiva un asesor.
+    Espera: { "is_active": true/false }
+    """
+    try:
+        user = _get_asesor_user_queryset().get(pk=pk)
+    except User.DoesNotExist:
+        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_44_NOT_FOUND)
+
+    is_active = request.data.get('is_active')
+    if is_active is None:
+        return Response(
+            {'detail': 'El campo "is_active" es requerido.'}, 
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user.is_active = bool(is_active)
+    user.save(update_fields=['is_active'])
+    
+    return Response(
+        {'detail': 'Estado actualizado.', 'is_active': user.is_active},
+        status=status.HTTP_200_OK
+    )
+
+
 def token_required(view_func):
     """
     Decorador que verifica que el token JWT sea válido y adjunta el usuario al request.
