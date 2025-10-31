@@ -81,6 +81,7 @@ from django.contrib.auth.models import User
 from .models import Permisos_usuarios, Perfil
 from .serializers import AsesorSerializer
 from .permissions import admin_permission_required # Asegúrate de importar tu decorador
+from django.contrib.auth.models import Group, User
 
 
 def _get_asesor_user_queryset():
@@ -243,6 +244,52 @@ def asesor_permission_required(view_func):
             
     return wrapper
 
+def cajero_permission_required(view_func):
+    """
+    Decorador personalizado que:
+    1. Autentica al usuario vía JWT (Bearer token).
+    2. Verifica que el usuario tenga el permiso de 'Cajero' (ID 11).
+    """
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        try:
+            # 1. Lógica de autenticación JWT
+            auth_header = request.headers.get('Authorization')
+            if not auth_header or not auth_header.startswith('Bearer '):
+                raise AuthenticationFailed('Token no proporcionado o con formato incorrecto.')
+            
+            token = auth_header.split(' ')[1]
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+            
+            user_id = payload.get('id')
+            if not user_id:
+                raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
+
+            user = User.objects.get(id=user_id)
+            # Asignamos el usuario a la request para que la vista lo use
+            request.user = user
+            
+            # --- 2. VERIFICACIÓN DE PERMISO (CORREGIDA) ---
+            # Verificamos el permiso de "caja" usando su ID (11)
+            
+            if not Permisos_usuarios.objects.filter(user=user, permiso__id=11, tiene_permiso=True).exists():
+                
+                # --- 3. MENSAJE DE ERROR (CORREGIDO) ---
+                raise AuthenticationFailed('No tienes los permisos de Cajero necesarios para acceder a este recurso.')
+            
+            # Si tiene el permiso, ejecutamos la vista original
+            return view_func(request, *args, **kwargs)
+
+        # Captura de errores de autenticación o permisos
+        except (jwt.InvalidTokenError, jwt.ExpiredSignatureError, AuthenticationFailed, User.DoesNotExist) as e:
+            return Response({'detail': str(e)}, status=403) # 403 Forbidden
+        
+        # Captura de cualquier otro error
+        except Exception as e:
+            return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
+            
+    return wrapper
+
 def get_sort_key(item):
     value = item.get('mes_pago') or item.get('mes_liquidacion')
     
@@ -375,7 +422,7 @@ def filtros_asesor_view(request):
 
 # --- DECORADOR DE PERMISOS (LO MANTENEMOS POR SEGURIDAD) ---
 @api_view(['POST'])
-@asesor_permission_required  # <--- 1. APLICA EL DECORADOR
+@cajero_permission_required
 def select_datos_corresponsal_cajero(request):
     try:
         # 2. YA NO NECESITAS EL TOKEN, el decorador se encargó de eso.
@@ -2248,7 +2295,7 @@ def get_image_corresponsal(request):
     pass
 
 @api_view(['POST'])
-@asesor_permission_required # <-- AÑADIDO: Se protege la vista
+@cajero_permission_required # <-- AÑADIDO: Se protege la vista
 def select_consignaciones_corresponsal_cajero(request):
     try:
         fecha_str = request.data['fecha']
@@ -2299,7 +2346,7 @@ def select_consignaciones_corresponsal_cajero(request):
 
 
 @api_view(['GET'])
-@asesor_permission_required
+@cajero_permission_required
 def historico_pendientes_cajero(request):
     try:
         usuario = request.user
@@ -2381,7 +2428,7 @@ def generate_unique_filename(original_name):
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
-@asesor_permission_required
+@cajero_permission_required
 def consignacion_corresponsal(request):
     """
     Registra una consignación de corresponsal:
@@ -2529,6 +2576,7 @@ def lista_usuarios(request):
         user.save()
         return Response([])
 
+
 @api_view(['POST'])
 def encargados_corresponsal(request):
     sucursales = models.Codigo_oficina.objects.values_list('terminal', flat=True).order_by('terminal')
@@ -2540,7 +2588,16 @@ def encargados_corresponsal(request):
         for i in responsables_qs
     }
     
-    users = User.objects.values('username', 'first_name', 'last_name')
+    # --- INICIO DE LA MODIFICACIÓN ---
+    # Filtramos usando tu sistema de permisos personalizado.
+    # 1. Filtramos por el ID del permiso (11 = 'caja')
+    # 2. Nos aseguramos de que 'tiene_permiso' sea True
+    # 3. Agregamos .distinct() para evitar duplicados si un usuario tiene el permiso varias veces.
+    users = User.objects.filter(
+        permisos_usuarios__permiso__id=11,
+        permisos_usuarios__tiene_permiso=True
+    ).values('username', 'first_name', 'last_name').distinct()
+    # --- FIN DE LA MODIFICACIÓN ---
     
     users_list = []
     users_options = []
@@ -2777,7 +2834,7 @@ def select_datos_corresponsal(request):
 
 
 @api_view(['POST'])
-@asesor_permission_required  # <--- 1. APLICA EL DECORADOR
+@cajero_permission_required  # <--- 1. APLICA EL DECORADOR
 def select_datos_corresponsal_cajero(request):
     try:
         # 2. El usuario ya está autenticado y disponible en 'request.user'
