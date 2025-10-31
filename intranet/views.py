@@ -2295,19 +2295,19 @@ def get_image_corresponsal(request):
     pass
 
 @api_view(['POST'])
-@cajero_permission_required # <-- AÑADIDO: Se protege la vista
+@cajero_permission_required # <-- Se protege la vista
 def select_consignaciones_corresponsal_cajero(request):
     try:
         fecha_str = request.data['fecha']
-        user = request.user # <-- AÑADIDO: Obtenemos el usuario del token
+        user = request.user # <-- Obtenemos el usuario del token
 
-        # AÑADIDO: Se obtiene la sucursal de forma segura desde el usuario
+        # Se obtiene la sucursal de forma segura desde el usuario
         responsable = models.Responsable_corresponsal.objects.filter(user=user).first()
         if not responsable or not responsable.sucursal:
             return Response({'error': 'Usuario no asignado a una sucursal válida.'}, status=404)
         sucursal = responsable.sucursal.terminal
 
-        # --- LÓGICA DE FECHA CORREGIDA ---
+        # --- LÓGICA DE FECHA ---
         if len(fecha_str) == 7: # Mes completo
             fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
             fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
@@ -2315,17 +2315,19 @@ def select_consignaciones_corresponsal_cajero(request):
             fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
             fecha_inicio_naive = datetime.combine(fecha_dia, time.min)
             fecha_fin_naive = datetime.combine(fecha_dia, time.max)
-        # --- FIN DE LA CORRECCIÓN ---
+        # --- FIN DE LÓGICA DE FECHA ---
 
         fecha_inicio = timezone.make_aware(fecha_inicio_naive)
         fecha_fin = timezone.make_aware(fecha_fin_naive)
 
-        # La consulta ahora usa la sucursal obtenida de forma segura
+        # --- CORRECCIÓN IMPORTANTE ---
+        # La consulta ahora filtra por 'fecha' (la fecha de cierre/reporte)
+        # en lugar de 'fecha_consignacion' (la fecha del recibo).
         transacciones_base = models.Corresponsal_consignacion.objects.filter(
-            # OJO: Se cambió a fecha_consignacion para que coincida con el reporte principal
-            fecha_consignacion__range=(fecha_inicio.date(), fecha_fin.date()),
+            fecha__range=(fecha_inicio.date(), fecha_fin.date()),
             codigo_incocredito=sucursal
         )
+        # --- FIN DE LA CORRECCIÓN ---
         
         total_real = transacciones_base.exclude(
              Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
