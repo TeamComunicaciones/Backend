@@ -3853,7 +3853,10 @@ def permissions_matrix(request):
         token = auth_header.split(' ')[1]
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
         
-        solicitante = User.objects.get(username=payload['id'])
+        # --- LÍNEA CORREGIDA ---
+        # Busca por 'id' en lugar de 'username'
+        solicitante = User.objects.get(id=payload['id']) 
+        
         if not solicitante.is_superuser:
             raise AuthenticationFailed('Solo los superusuarios pueden ver los permisos.')
 
@@ -3876,6 +3879,7 @@ def permissions_matrix(request):
 
         usuarios_con_permisos = []
         for usuario in todos_los_usuarios:
+            # Corrección potencial: Asegurarse de que el usuario.id exista en el dict
             roles = {rol['name']: usuario.id in permisos_por_usuario and rol['name'] in permisos_por_usuario[usuario.id] 
                      for rol in roles_disponibles}
             usuarios_con_permisos.append({
@@ -3890,6 +3894,7 @@ def permissions_matrix(request):
         })
 
     except (AuthenticationFailed, User.DoesNotExist, jwt.ExpiredSignatureError, jwt.DecodeError) as e:
+        # User.DoesNotExist será capturado aquí si el ID del token no es válido
         return Response({'detail': str(e)}, status=401)
     except Exception as e:
         return Response({'detail': f'Error inesperado: {str(e)}'}, status=500)
@@ -3904,7 +3909,10 @@ def permissions_edit(request):
         
         token = auth_header.split(' ')[1]
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-        solicitante = User.objects.get(username=payload['id'])
+        
+        # --- LÍNEA CORREGIDA ---
+        solicitante = User.objects.get(id=payload['id']) # <-- Aquí está el cambio
+        
         if not solicitante.is_superuser:
             raise AuthenticationFailed('Solo los superusuarios pueden editar permisos.')
 
@@ -3912,9 +3920,12 @@ def permissions_edit(request):
             data_a_guardar = request.data.get('data', [])
             
             user_ids = [item['user_id'] for item in data_a_guardar]
+            # Es más seguro filtrar por el user_id del solicitante
+            # pero asumimos que un superuser puede editar a todos.
             models.Permisos_usuarios.objects.filter(user_id__in=user_ids).delete()
 
             permisos_a_crear = []
+            # Traer solo los permisos necesarios es más eficiente
             todos_los_permisos_map = {p.permiso: p for p in models.Permisos.objects.all()}
             
             for item_usuario in data_a_guardar:
@@ -3939,6 +3950,7 @@ def permissions_edit(request):
         return Response({'detail': str(e)}, status=401)
     except Exception as e:
         return Response({'detail': f'Error inesperado al guardar: {str(e)}'}, status=500)
+    
     
 from rest_framework.decorators import api_view
 from rest_framework.response import Response

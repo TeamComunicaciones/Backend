@@ -179,15 +179,15 @@ def procesar_archivo_comisiones(file_path, user_id):
         first_sheet_name = next(iter(sheets_dict))
         df_for_month_check = sheets_dict[first_sheet_name]
         
-        meses_en_archivo = pd.to_datetime(df_for_month_check['MES LIQUIDACIÓN'], format='%B %Y', errors='coerce').dt.to_period('M')
+        meses_en_archivo = pd.to_datetime(df_for_month_check['MES PAGO'], format='%B %Y', errors='coerce').dt.to_period('M')
         mes_nuevo_periodo = meses_en_archivo.dropna().unique()[0]
         mes_nuevo_fecha = mes_nuevo_periodo.to_timestamp().date()
         logger.info(f"Mes detectado en el archivo: {mes_nuevo_periodo}")
 
-        ultimo_mes_registrado = models.Comision.objects.aggregate(max_mes=Max('mes_liquidacion'))['max_mes']
+        ultimo_mes_registrado = models.Comision.objects.aggregate(max_mes=Max('mes_pago'))['max_mes']
 
         if ultimo_mes_registrado:
-            logger.info(f"Último mes de liquidación en la BD: {ultimo_mes_registrado.strftime('%Y-%m')}")
+            logger.info(f"Último mes de PAGO en la BD: {ultimo_mes_registrado.strftime('%Y-%m')}")
             
             if mes_nuevo_fecha > ultimo_mes_registrado:
                 # PASO 1: Vencer por inactividad PRIMERO. Capturamos ambos resultados.
