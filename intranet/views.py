@@ -23,6 +23,10 @@ import logging
 from io import BytesIO
 import pytz
 from openpyxl import Workbook
+from django.utils.dateparse import parse_date
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
+
+
 # 2. Third-party Library Imports
 import jwt
 import numpy as np
@@ -82,6 +86,11 @@ from .models import Permisos_usuarios, Perfil
 from .serializers import AsesorSerializer
 from .permissions import admin_permission_required # Asegúrate de importar tu decorador
 from django.contrib.auth.models import Group, User
+
+# Importar modelos
+from .models import PagoComision, Comision, Perfil, Permisos_usuarios
+# Importar el serializador que creamos
+from .serializers import PagoComisionAdminSerializer
 
 
 def _get_asesor_user_queryset():
@@ -386,6 +395,138 @@ def asignar_ruta_view(request):
 
 ruta = "D:\\Proyectos\\TeamComunicaciones\\pagina\\frontend\\src\\assets"
 
+@api_view(['GET'])
+@admin_permission_required
+def admin_pago_list(request):
+    """
+    Devuelve una lista paginada de Pagos
+    filtrados para el panel de admin.
+    """
+    queryset = PagoComision.objects.all().select_related('creado_por').prefetch_related('comisiones_pagadas')
+    
+    ruta = request.query_params.get('ruta')
+    punto_de_venta = request.query_params.get('punto_de_venta')
+    fecha_inicio = request.query_params.get('fecha_inicio')
+    fecha_fin = request.query_params.get('fecha_fin')
+
+    if ruta:
+        queryset = queryset.filter(creado_por__perfil__ruta_asignada=ruta)
+    
+    if punto_de_venta:
+        # Actualizado para coincidir con la lógica del dropdown
+        queryset = queryset.filter(punto_de_venta=punto_de_venta)
+
+    if fecha_inicio and fecha_fin:
+        try:
+            start_date = parse_date(fecha_inicio)
+            end_date = parse_date(fecha_fin)
+            queryset = queryset.filter(fecha_pago__date__range=[start_date, end_date])
+        except (ValueError, TypeError):
+            pass
+
+    queryset = queryset.order_by('-fecha_pago')
+    
+    # --- Lógica de Paginación ---
+    paginator = Paginator(queryset, 10) # 10 items por página
+    page_number = request.query_params.get('page', 1)
+    
+    try:
+        page_obj = paginator.page(page_number)
+    except PageNotAnInteger:
+        page_obj = paginator.page(1)
+    except EmptyPage:
+        page_obj = paginator.page(paginator.num_pages)
+    
+    serializer = PagoComisionAdminSerializer(page_obj.object_list, many=True)
+    
+    # Devolvemos la estructura de paginación
+    return Response({
+        'count': paginator.count,
+        'results': serializer.data,
+        'current_page': page_obj.number,
+        'total_pages': paginator.num_pages,
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['PUT', 'DELETE'])
+@admin_permission_required
+def admin_pago_detail(request, pk):
+    try:
+        pago = PagoComision.objects.get(pk=pk)
+    except PagoComision.DoesNotExist:
+        return Response({'detail': 'Pago no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'PUT':
+        data = request.data
+        try:
+            monto_str = data.get('monto')
+            fecha_pago_str = data.get('fecha_pago')
+            metodo_pago_str = data.get('metodo_pago')
+            
+            if not all([monto_str, fecha_pago_str, metodo_pago_str]):
+                 return Response({'detail': 'Monto, fecha_pago y metodo_pago son requeridos.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            monto = Decimal(monto_str)
+            fecha_pago_obj = parse_date(fecha_pago_str)
+            
+            if fecha_pago_obj is None:
+                return Response({'detail': 'El formato de fecha es inválido.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            with transaction.atomic():
+                pago.monto_total_pagado = monto
+                pago.monto_comisiones = monto
+                pago.fecha_pago = pago.fecha_pago.replace(
+                    year=fecha_pago_obj.year, 
+                    month=fecha_pago_obj.month, 
+                    day=fecha_pago_obj.day
+                )
+                pago.metodos_pago = { metodo_pago_str: float(monto) }
+                pago.observacion = data.get('observacion', '')
+                pago.save()
+            
+            serializer = PagoComisionAdminSerializer(pago)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({'detail': f'Error al actualizar: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        try:
+            with transaction.atomic():
+                comisiones_a_reversar = pago.comisiones_pagadas.all()
+                comisiones_a_reversar.update(pagos=None, estado='Pendiente', mes_pago=None)
+                pago.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            return Response({'detail': f'Error al reversar: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        
+@api_view(['GET'])
+@admin_permission_required
+def admin_puntos_de_venta_list(request):
+    """
+    Devuelve una lista de Puntos de Venta (únicos)
+    filtrados por una ruta específica.
+    Usado para el dropdown dependiente en el admin.
+    """
+    ruta = request.query_params.get('ruta')
+    if not ruta:
+        return Response([], status=status.HTTP_200_OK) # Devuelve vacío si no hay ruta
+
+    try:
+        # Buscamos en el modelo 'Comision' que tiene la relación
+        # entre ruta y punto_de_venta.
+        puntos = Comision.objects.filter(ruta=ruta) \
+                                 .values_list('punto_de_venta', flat=True) \
+                                 .distinct() \
+                                 .order_by('punto_de_venta')
+        
+        # Devolvemos la lista de strings
+        return Response(list(puntos), status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        return Response({'detail': f'Error al obtener puntos de venta: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
 @api_view(['GET'])
 def filtros_asesor_view(request):
     """
@@ -2669,20 +2810,36 @@ def resumen_corresponsal(request):
         )
         print(f"DEBUG [3]: Registros para la VISTA (excluyendo 'Conciliado' con detalle): {consignaciones_para_vista.count()}")
 
-        fechas_transacciones = consignaciones_para_vista.values_list('fecha__date', flat=True).distinct()
-        print(f"DEBUG [4]: Fechas de transacción extraídas de las consignaciones: {list(fechas_transacciones)}")
+        # --- INICIO BLOQUE CORREGIDO ---
+        # Ahora filtramos Transacciones_sucursal usando la fecha de entrada (fecha_str)
+        # en lugar de las fechas de las consignaciones.
+        
+        print(f"DEBUG [4]: Creando filtro de CAJERO basado en la fecha de entrada: '{fecha_str}'")
 
-        transacciones_cajero_qs = models.Transacciones_sucursal.objects.none()
-        if fechas_transacciones:
-            filtro_cajero_corregido = Q(fecha__date__in=fechas_transacciones)
-            transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero_corregido)
-            print(f"DEBUG [5A]: Transacciones de cajero encontradas por FECHAS ({len(fechas_transacciones)}): {transacciones_cajero_qs.count()}")
-            
-            if sucursal_code and sucursal_code not in ['0', '-1']:
-                transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
-                print(f"DEBUG [5B]: Transacciones de cajero restantes tras filtrar por SUCURSAL: {transacciones_cajero_qs.count()}")
+        filtro_cajero = Q()
+        if len(fecha_str) == 7:
+            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
+            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
+            fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+            fecha_fin = timezone.make_aware(fecha_fin_naive)
+            filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
+            print(f"DEBUG [5A]: Filtro de CAJERO por RANGO DE MES: {fecha_inicio} a {fecha_fin}")
         else:
-             print("DEBUG [5]: No se buscaron transacciones de cajero porque no se encontraron fechas de consignación.")
+            fecha_inicio_naive = datetime.strptime(fecha_str, '%Y-%m-%d')
+            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+            fecha_inicio = timezone.make_aware(fecha_inicio_naive)
+            fecha_fin = timezone.make_aware(fecha_fin_naive)
+            filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
+            print(f"DEBUG [5A]: Filtro de CAJERO por RANGO DE DÍA: {fecha_inicio} a {fecha_fin}")
+            
+        transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero)
+        print(f"DEBUG [5B]: Transacciones de cajero encontradas por FECHA: {transacciones_cajero_qs.count()}")
+
+        if sucursal_code and sucursal_code not in ['0', '-1']:
+            transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
+            print(f"DEBUG [5C]: Transacciones de cajero restantes tras filtrar por SUCURSAL: {transacciones_cajero_qs.count()}")
+        # --- FIN BLOQUE CORREGIDO ---
+
 
         responsable_ids = consignaciones_qs.values_list('responsable', flat=True).distinct()
         valid_responsable_ids = [int(id) for id in responsable_ids if id and str(id).isdigit()]

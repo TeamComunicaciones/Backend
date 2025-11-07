@@ -1,6 +1,7 @@
 from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 class Perfil(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -209,18 +210,21 @@ class ImagenLogin(models.Model):
     fecha = models.DateTimeField(auto_now=True)
     
 class PagoComision(models.Model):
-        # Este es un comentario para forzar la detección
-
     idpos = models.CharField(max_length=100, db_index=True)
     punto_de_venta = models.CharField(max_length=200, null=True, blank=True)
     creado_por = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='pagos_realizados')
-    fecha_pago = models.DateTimeField(auto_now_add=True)
+    
+    # Se usa default=timezone.now para que sea editable
+    fecha_pago = models.DateTimeField(default=timezone.now) 
+
     monto_total_pagado = models.DecimalField(max_digits=12, decimal_places=2)
     monto_comisiones = models.DecimalField(max_digits=12, decimal_places=2)
-    metodos_pago = models.JSONField() # Aquí guardaremos {'Recarga': 50000, 'Cartera': 25000}
+    metodos_pago = models.JSONField()
+
+    # Nuevo campo para observaciones
+    observacion = models.TextField(blank=True, null=True)
 
     def __str__(self):
-        # Comprobamos si 'creado_por' existe para evitar errores
         usuario = self.creado_por.username if self.creado_por else "Usuario Desconocido"
         return f"Pago por {usuario} de {self.monto_total_pagado} el {self.fecha_pago.strftime('%Y-%m-%d')}"
 
