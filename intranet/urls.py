@@ -88,4 +88,7 @@ urlpatterns = [
     path('admin/asesores/', views.asesor_list_create, name='asesor-list-create'),
     path('admin/asesores/<int:pk>/', views.asesor_detail, name='asesor-detail'),
     path('admin/asesores/<int:pk>/activar/', views.asesor_toggle_active, name='asesor-toggle-active'),
+    path('admin/pagos/', views.admin_pago_list, name='admin-pago-list'),
+    path('admin/pagos/<int:pk>/', views.admin_pago_detail, name='admin-pago-detail'),
+    path('admin/puntos-de-venta/', views.admin_puntos_de_venta_list, name='admin-puntos-de-venta-list'),
 ]

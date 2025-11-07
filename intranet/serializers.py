@@ -3,6 +3,10 @@ from .models import (
     ActaEntrega, ActaObjetivos, ActaObservaciones, ActaRecibidoPor, ActaArchivos, 
     Proyecto, ImagenLogin, Permisos_usuarios, Comision
 )
+
+from .models import PagoComision
+from django.utils import timezone
+
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework import serializers
@@ -10,6 +14,62 @@ from django.db import transaction
 # Importamos los modelos correctos de tu archivo
 from django.contrib.auth.models import User
 from .models import Perfil, Permisos, Permisos_usuarios
+
+class PagoComisionAdminSerializer(serializers.ModelSerializer):
+    """
+    Serializador para la vista de admin que maneja las
+    inconsistencias entre el frontend y el backend.
+    """
+    asesor_username = serializers.CharField(source='creado_por.username', read_only=True)
+    monto = serializers.DecimalField(source='monto_total_pagado', max_digits=12, decimal_places=2, read_only=True)
+    metodo_pago = serializers.SerializerMethodField()
+    comision = serializers.SerializerMethodField()
+    
+    # --- LA CORRECCIÓN DEFINITIVA ---
+    # Usamos un SerializerMethodField para convertir explícitamente
+    # el DateTime a un Date en la zona horaria local.
+    fecha_pago = serializers.SerializerMethodField()
+    
+    observacion = serializers.CharField(required=False, allow_blank=True)
+
+    # El campo 'idpos' ya existe en el modelo, así que solo lo añadimos a 'fields'
+    idpos = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = PagoComision
+        fields = [
+            'id',
+            'idpos', # <-- ¡AÑADIDO!
+            'asesor_username',
+            'comision',
+            'monto',
+            'fecha_pago',       # <- Ahora usa el método
+            'metodo_pago',
+            'observacion',
+        ]
+
+    def get_metodo_pago(self, obj):
+        if obj.metodos_pago and isinstance(obj.metodos_pago, dict):
+            return next(iter(obj.metodos_pago.keys()), None)
+        return None
+
+    def get_comision(self, obj):
+        first_comision = obj.comisiones_pagadas.first()
+        if first_comision:
+            return first_comision.id
+        return None
+
+    # --- MÉTODO AÑADIDO PARA LA CORRECCIÓN ---
+    def get_fecha_pago(self, obj):
+        """
+        Convierte el DateTime (posiblemente en UTC) a un objeto Date
+        en la zona horaria local del servidor.
+        """
+        if obj.fecha_pago:
+            # timezone.localtime() lo convierte a la zona horaria
+            # de tu settings.py y .date() extrae solo la fecha.
+            return timezone.localtime(obj.fecha_pago).date()
+        return None
 
 class ProyectoSerializer(serializers.ModelSerializer):
     class Meta:
