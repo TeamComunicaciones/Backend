@@ -2,10 +2,10 @@
 import ast
 import base64
 import calendar
-import decimal
 import io
 import json
 import locale
+import logging
 import operator
 import os
 import random
@@ -19,32 +19,36 @@ from collections import defaultdict
 from datetime import datetime, date, timedelta, time
 from decimal import Decimal, InvalidOperation
 from functools import reduce, wraps
-import logging
 from io import BytesIO
-import pytz
-from openpyxl import Workbook
-from django.utils.dateparse import parse_date
-from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 
-
-# 2. Third-party Library Imports
-import jwt
+# Third-party utility libraries
 import numpy as np
 import pandas as pd
+import pytz
 import requests
 from dateutil.relativedelta import relativedelta
-from drf_yasg import openapi
-from drf_yasg.utils import swagger_auto_schema
+
+# Third-party security/API libraries
+import jwt
 from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidTokenError
 
-# 3. Django Imports
+# Third-party file processing libraries
+from openpyxl import Workbook
+
+# Third-party Django/DRF specific libraries
+from drf_yasg import openapi
+from drf_yasg.utils import swagger_auto_schema
+
+
+# 2. Django Core & Utility Imports
 from django.conf import settings
 from django.contrib.auth import authenticate
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, Group
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.core.exceptions import ObjectDoesNotExist
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage, FileSystemStorage
+from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 from django.db import IntegrityError, transaction
 from django.db.models import (
     Case, Count, DecimalField, F, Max, OuterRef, Prefetch, Q, Subquery, Sum,
@@ -56,13 +60,18 @@ from django.dispatch import receiver
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from django.utils.dateparse import parse_datetime
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
+from django.contrib.postgres.aggregates import ArrayAgg
+from django.db.models import Value
 
-# 4. Django REST Framework Imports
+
+
+# 3. Django REST Framework Imports
 from rest_framework import status
-from rest_framework.decorators import (api_view, parser_classes,
-                                       permission_classes, schema)
+from rest_framework.decorators import (
+    api_view, parser_classes, permission_classes, schema
+)
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -70,27 +79,64 @@ from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-# 5. Local Application Imports
+
+# 4. Local Application Imports
 from sqlControl.sqlControl import Sql_conexion
 from . import models
-from .models import (ActaEntrega, Comision, ImagenLogin, Permisos_usuarios,
-                     ReporteDetalleVenta)
-from .serializers import (ActaEntregaSerializer, ComisionSerializer,
-                          CustomTokenObtainPairSerializer,
-                          ImagenLoginSerializer, UserDataSerializer)
+from .models import (
+    ActaEntrega, Comision, ImagenLogin, PagoComision, Perfil, Permisos_usuarios,
+    ReporteDetalleVenta
+)
+from .serializers import (
+    ActaEntregaSerializer, AsesorSerializer, ComisionSerializer,
+    CustomTokenObtainPairSerializer, ImagenLoginSerializer,
+    PagoComisionAdminSerializer, UserDataSerializer
+)
 from .services import process_sales_report_file
 from .tasks import procesar_archivo_comisiones
+from .permissions import admin_permission_required # Asegúrate de que esta importación sea correcta
 
-from django.contrib.auth.models import User
-from .models import Permisos_usuarios, Perfil
-from .serializers import AsesorSerializer
-from .permissions import admin_permission_required # Asegúrate de importar tu decorador
-from django.contrib.auth.models import Group, User
+# --- Helpers para decimales/KPIs y lógica de pagos ---
 
-# Importar modelos
-from .models import PagoComision, Comision, Perfil, Permisos_usuarios
-# Importar el serializador que creamos
-from .serializers import PagoComisionAdminSerializer
+def decimal_or_zero(value):
+    """
+    Convierte cualquier cosa a Decimal >= 0, o 0 si no se puede.
+    """
+    if value is None:
+        return Decimal('0')
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal('0')
+
+
+def safe_sum(qs, field_name):
+    """
+    Suma un campo decimal en un queryset de forma segura.
+    """
+    return decimal_or_zero(
+        qs.aggregate(total=Coalesce(Sum(field_name), 0))['total']
+    )
+
+
+# Prefijos para identificar comisiones "fantasma" creadas por pagar_comisiones_view
+LEDGER_PREFIXES = (
+    "PAGO REGISTRADO #",
+    "SALDO PENDIENTE PAGO #",
+    "AJUSTE POR SOBRANTE PAGO #",
+    "USO DE SALDO EN PAGO #",
+)
+
+
+def es_comision_ledger(comision_obj):
+    """
+    Devuelve True si la comisión parece ser una comisión 'artificial'
+    creada por el proceso de pago (no viene del Excel original).
+    """
+    producto = (comision_obj.producto or "").strip()
+    return any(producto.startswith(pref) for pref in LEDGER_PREFIXES)
 
 
 def _get_asesor_user_queryset():
@@ -402,7 +448,12 @@ def admin_pago_list(request):
     Devuelve una lista paginada de Pagos
     filtrados para el panel de admin.
     """
-    queryset = PagoComision.objects.all().select_related('creado_por').prefetch_related('comisiones_pagadas')
+    queryset = (
+        PagoComision.objects
+        .all()
+        .select_related('creado_por')
+        .prefetch_related('comisiones_pagadas')
+    )
     
     ruta = request.query_params.get('ruta')
     punto_de_venta = request.query_params.get('punto_de_venta')
@@ -413,21 +464,20 @@ def admin_pago_list(request):
         queryset = queryset.filter(creado_por__perfil__ruta_asignada=ruta)
     
     if punto_de_venta:
-        # Actualizado para coincidir con la lógica del dropdown
         queryset = queryset.filter(punto_de_venta=punto_de_venta)
 
     if fecha_inicio and fecha_fin:
         try:
             start_date = parse_date(fecha_inicio)
             end_date = parse_date(fecha_fin)
-            queryset = queryset.filter(fecha_pago__date__range=[start_date, end_date])
+            if start_date and end_date:
+                queryset = queryset.filter(fecha_pago__date__range=[start_date, end_date])
         except (ValueError, TypeError):
             pass
 
     queryset = queryset.order_by('-fecha_pago')
     
-    # --- Lógica de Paginación ---
-    paginator = Paginator(queryset, 10) # 10 items por página
+    paginator = Paginator(queryset, 10)  # 10 items por página
     page_number = request.query_params.get('page', 1)
     
     try:
@@ -439,7 +489,6 @@ def admin_pago_list(request):
     
     serializer = PagoComisionAdminSerializer(page_obj.object_list, many=True)
     
-    # Devolvemos la estructura de paginación
     return Response({
         'count': paginator.count,
         'results': serializer.data,
@@ -451,54 +500,109 @@ def admin_pago_list(request):
 @api_view(['PUT', 'DELETE'])
 @admin_permission_required
 def admin_pago_detail(request, pk):
+    """
+    PUT: Actualiza un pago de comisiones.
+    DELETE: Reversa un pago (borra el PagoComision y reajusta Comision).
+    """
     try:
         pago = PagoComision.objects.get(pk=pk)
     except PagoComision.DoesNotExist:
         return Response({'detail': 'Pago no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
+    # --- ACTUALIZAR PAGO ---
     if request.method == 'PUT':
-        data = request.data
+        data = request.data or {}
         try:
             monto_str = data.get('monto')
             fecha_pago_str = data.get('fecha_pago')
             metodo_pago_str = data.get('metodo_pago')
-            
-            if not all([monto_str, fecha_pago_str, metodo_pago_str]):
-                 return Response({'detail': 'Monto, fecha_pago y metodo_pago son requeridos.'}, status=status.HTTP_400_BAD_REQUEST)
+            observacion = data.get('observacion', '')
 
-            monto = Decimal(monto_str)
+            if not all([monto_str, fecha_pago_str, metodo_pago_str]):
+                return Response(
+                    {'detail': 'Monto, fecha_pago y metodo_pago son requeridos.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+            monto = decimal_or_zero(monto_str)
+            if monto <= 0:
+                return Response(
+                    {'detail': 'El monto debe ser mayor que cero.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             fecha_pago_obj = parse_date(fecha_pago_str)
-            
             if fecha_pago_obj is None:
-                return Response({'detail': 'El formato de fecha es inválido.'}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {'detail': 'Formato de fecha inválido (usa YYYY-MM-DD).'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
             with transaction.atomic():
                 pago.monto_total_pagado = monto
                 pago.monto_comisiones = monto
+                # Mantiene la hora, cambia solo la fecha
                 pago.fecha_pago = pago.fecha_pago.replace(
-                    year=fecha_pago_obj.year, 
-                    month=fecha_pago_obj.month, 
+                    year=fecha_pago_obj.year,
+                    month=fecha_pago_obj.month,
                     day=fecha_pago_obj.day
                 )
-                pago.metodos_pago = { metodo_pago_str: float(monto) }
-                pago.observacion = data.get('observacion', '')
+                pago.metodos_pago = {metodo_pago_str: float(monto)}
+                pago.observacion = observacion
                 pago.save()
-            
+
             serializer = PagoComisionAdminSerializer(pago)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
         except Exception as e:
-            return Response({'detail': f'Error al actualizar: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'detail': f'Error al actualizar: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
+    # --- REVERSAR PAGO ---
     elif request.method == 'DELETE':
+        """
+        Reverso robusto:
+
+        - Comisiones originales (las del Excel) -> estado='Pendiente',
+          pagos=None, mes_pago = mes_liquidacion (si existe) o None.
+
+        - Comisiones 'fantasma' creadas por el pago
+          (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO) -> se borran.
+
+        - Luego se elimina el PagoComision.
+        """
         try:
             with transaction.atomic():
-                comisiones_a_reversar = pago.comisiones_pagadas.all()
-                comisiones_a_reversar.update(pagos=None, estado='Pendiente', mes_pago=None)
+                comisiones_relacionadas = pago.comisiones_pagadas.all()
+
+                for com in comisiones_relacionadas:
+                    if es_comision_ledger(com):
+                        # Es un registro artificial ligado al pago → se borra
+                        com.delete()
+                    else:
+                        # Comisión original → se revierte
+                        com.estado = 'Pendiente'
+                        com.pagos = None
+
+                        # Se devuelve al mes de liquidación original, si existe
+                        if com.mes_liquidacion:
+                            com.mes_pago = com.mes_liquidacion
+                        else:
+                            com.mes_pago = None
+
+                        com.save()
+
                 pago.delete()
+
             return Response(status=status.HTTP_204_NO_CONTENT)
+
         except Exception as e:
-            return Response({'detail': f'Error al reversar: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response(
+                {'detail': f'Error al reversar el pago: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
         
         
 @api_view(['GET'])
@@ -511,22 +615,23 @@ def admin_puntos_de_venta_list(request):
     """
     ruta = request.query_params.get('ruta')
     if not ruta:
-        return Response([], status=status.HTTP_200_OK) # Devuelve vacío si no hay ruta
+        return Response([], status=status.HTTP_200_OK)
 
     try:
-        # Buscamos en el modelo 'Comision' que tiene la relación
-        # entre ruta y punto_de_venta.
-        puntos = Comision.objects.filter(ruta=ruta) \
-                                 .values_list('punto_de_venta', flat=True) \
-                                 .distinct() \
-                                 .order_by('punto_de_venta')
-        
-        # Devolvemos la lista de strings
+        puntos = (
+            Comision.objects
+            .filter(ruta=ruta)
+            .values_list('punto_de_venta', flat=True)
+            .distinct()
+            .order_by('punto_de_venta')
+        )
         return Response(list(puntos), status=status.HTTP_200_OK)
-        
     except Exception as e:
-        return Response({'detail': f'Error al obtener puntos de venta: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
+        return Response(
+            {'detail': f'Error al obtener puntos de venta: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+                
 @api_view(['GET'])
 def filtros_asesor_view(request):
     """
@@ -732,67 +837,106 @@ from django.db.models import Sum, Q
 @asesor_permission_required
 def reporte_comparativa_view(request):
     """
-    Genera datos para el gráfico comparativo.
-    Ahora maneja correctamente el caso donde no hay comisiones pagadas.
+    Genera datos para el gráfico comparativo (mes actual vs anterior).
+
+    Usa mes_liquidacion como referencia de mes.
+    Clampea valores negativos a 0 para evitar cosas raras.
     """
     try:
         ruta_asesor = request.user.perfil.ruta_asignada
         if not ruta_asesor:
-            return Response({"error": "No tienes una ruta asignada."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "No tienes una ruta asignada."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
         base_queryset = models.Comision.objects.filter(ruta__iexact=ruta_asesor)
-        
+
         pdv_seleccionados = request.query_params.getlist('pdv', [])
         if not pdv_seleccionados:
             return Response([])
 
-        # --- LÓGICA DE FECHA CORREGIDA Y ROBUSTA ---
+        # Buscar el último mes con mes_liquidacion, si existe
         ultimo_mes_obj = None
-        # Primero, verificamos si existe alguna comisión con mes_pago antes de buscar la última
-        if base_queryset.filter(mes_pago__isnull=False).exists():
-            ultimo_mes_obj = base_queryset.filter(mes_pago__isnull=False).latest('mes_pago')
+        if base_queryset.filter(mes_liquidacion__isnull=False).exists():
+            ultimo_mes_obj = base_queryset.filter(mes_liquidacion__isnull=False).latest('mes_liquidacion')
 
         if ultimo_mes_obj:
-            # Si se encontró, usamos ese mes como referencia
-            ultimo_mes = ultimo_mes_obj.mes_pago.replace(day=1)
+            ultimo_mes = ultimo_mes_obj.mes_liquidacion.replace(day=1)
         else:
-            # Si no, usamos el mes actual como referencia para evitar errores
             ultimo_mes = timezone.now().date().replace(day=1)
         
-        mes_anterior = (ultimo_mes - relativedelta(months=1))
-        # --- FIN DE LA CORRECCIÓN ---
-        
-        condicion_mes_actual = Q(mes_pago__year=ultimo_mes.year, mes_pago__month=ultimo_mes.month)
-        condicion_mes_anterior = Q(mes_pago__year=mes_anterior.year, mes_pago__month=mes_anterior.month)
+        # Mes anterior
+        if ultimo_mes.month == 1:
+            mes_anterior_date = date(ultimo_mes.year - 1, 12, 1)
+        else:
+            mes_anterior_date = date(ultimo_mes.year, ultimo_mes.month - 1, 1)
+
+        condicion_mes_actual = Q(
+            mes_liquidacion__year=ultimo_mes.year,
+            mes_liquidacion__month=ultimo_mes.month
+        )
+        condicion_mes_anterior = Q(
+            mes_liquidacion__year=mes_anterior_date.year,
+            mes_liquidacion__month=mes_anterior_date.month
+        )
 
         resultados = []
-        
+
+        # TOTAL RUTA
         if 'TOTAL RUTA' in pdv_seleccionados:
             total_ruta = base_queryset.aggregate(
                 total_mes_actual=Sum('comision_final', filter=condicion_mes_actual, default=0),
-                total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0)
+                total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0),
             )
+            total_actual = decimal_or_zero(total_ruta.get('total_mes_actual'))
+            total_anterior = decimal_or_zero(total_ruta.get('total_mes_anterior'))
+
+            if total_actual < 0:
+                total_actual = Decimal('0')
+            if total_anterior < 0:
+                total_anterior = Decimal('0')
+
             resultados.append({
                 'punto_de_venta': 'TOTAL RUTA',
-                'total_mes_actual': total_ruta['total_mes_actual'],
-                'total_mes_anterior': total_ruta['total_mes_anterior']
+                'total_mes_actual': float(total_actual),
+                'total_mes_anterior': float(total_anterior),
             })
             pdv_seleccionados.remove('TOTAL RUTA')
 
+        # Por PDV
         if pdv_seleccionados:
-            pdv_detalles = base_queryset.filter(
-                punto_de_venta__in=pdv_seleccionados
-            ).values('punto_de_venta').annotate(
-                total_mes_actual=Sum('comision_final', filter=condicion_mes_actual, default=0),
-                total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0)
-            ).order_by('punto_de_venta')
-            
-            resultados.extend(list(pdv_detalles))
+            pdv_detalles = (
+                base_queryset
+                .filter(punto_de_venta__in=pdv_seleccionados)
+                .values('punto_de_venta')
+                .annotate(
+                    total_mes_actual=Sum('comision_final', filter=condicion_mes_actual, default=0),
+                    total_mes_anterior=Sum('comision_final', filter=condicion_mes_anterior, default=0),
+                )
+                .order_by('punto_de_venta')
+            )
+
+            for item in pdv_detalles:
+                total_actual = decimal_or_zero(item.get('total_mes_actual'))
+                total_anterior = decimal_or_zero(item.get('total_mes_anterior'))
+
+                if total_actual < 0:
+                    total_actual = Decimal('0')
+                if total_anterior < 0:
+                    total_anterior = Decimal('0')
+
+                resultados.append({
+                    'punto_de_venta': item['punto_de_venta'],
+                    'total_mes_actual': float(total_actual),
+                    'total_mes_anterior': float(total_anterior),
+                })
 
         return Response(resultados)
 
     except models.Perfil.DoesNotExist:
         return Response([])
+
     
 # intranet/views.py
 
@@ -865,89 +1009,188 @@ def consulta_agrupada_pdv_view(request):
 
 
 @api_view(['POST'])
-@asesor_permission_required # Descomenta si usas tu decorador de permisos
+@asesor_permission_required
 def pagar_comisiones_view(request):
+    """
+    Procesa el pago de comisiones desde el dashboard del asesor.
+
+    Body:
+    {
+        "comision_ids": [1,2,3],
+        "metodos_pago": {
+            "Nequi": 10000,
+            "Recarga": 5000,
+            "Acumulado": 2000
+        }
+    }
+
+    Reglas:
+      - Solo comisiones en estado Pendiente o Acumulada.
+      - agrupa por mismo idpos.
+      - Crea un PagoComision.
+      - CREA registros 'fantasma' (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO),
+        pero NUNCA con valores negativos.
+      - Reversible con admin_pago_detail (DELETE).
+    """
     comision_ids = request.data.get('comision_ids', [])
     metodos_pago_original = request.data.get('metodos_pago', {})
 
     if not comision_ids or not metodos_pago_original:
-        return Response({"error": "Faltan datos para procesar el pago."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": "Faltan datos para procesar el pago."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
     with transaction.atomic():
-        comisiones_a_pagar = models.Comision.objects.filter(pk__in=comision_ids, estado__in=['Pendiente', 'Acumulada'])
+        comisiones_a_pagar = (
+            models.Comision.objects
+            .filter(pk__in=comision_ids, estado__in=['Pendiente', 'Acumulada'])
+            .select_for_update()
+        )
         
         if not comisiones_a_pagar.exists():
-            return Response({"error": "No se encontraron comisiones válidas para pagar."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "No se encontraron comisiones válidas para pagar."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         idpos_unicos = comisiones_a_pagar.values_list('idpos', flat=True).distinct()
         if idpos_unicos.count() > 1:
-            return Response({"error": "No se pueden pagar comisiones de diferentes Puntos de Venta a la vez."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "No se pueden pagar comisiones de diferentes Puntos de Venta a la vez."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         primera_comision = comisiones_a_pagar.first()
-        monto_comisiones = comisiones_a_pagar.aggregate(total=Sum('comision_final'))['total'] or 0
 
-        # Separar el pago con 'Acumulado' de los otros métodos de pago
-        monto_acumulado_usado = metodos_pago_original.get('Acumulado', 0)
-        monto_real_pagado = sum(valor for k, valor in metodos_pago_original.items() if k != 'Acumulado' and isinstance(valor, (int, float)))
-        
+        # Total de comisiones a pagar
+        monto_comisiones = decimal_or_zero(
+            comisiones_a_pagar.aggregate(total=Sum('comision_final'))['total']
+        )
+
+        # Normalizar metodos_pago a Decimals y separar Acumulado
+        monto_acumulado_usado = decimal_or_zero(
+            metodos_pago_original.get('Acumulado', 0)
+        )
+
+        monto_real_pagado = Decimal('0')
+        metodos_pago_normalizados = {}
+
+        for metodo, valor in metodos_pago_original.items():
+            valor_dec = decimal_or_zero(valor)
+            if valor_dec <= 0:
+                continue
+            metodos_pago_normalizados[metodo] = float(valor_dec)
+            if metodo != 'Acumulado':
+                monto_real_pagado += valor_dec
+
+        total_metodos = monto_real_pagado + monto_acumulado_usado
+
+        if monto_comisiones <= 0:
+            return Response(
+                {"error": "El total de comisiones es cero o negativo."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if total_metodos <= 0:
+            return Response(
+                {"error": "El total ingresado en los métodos de pago debe ser mayor a cero."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Creamos el PagoComision
         pago = models.PagoComision.objects.create(
             idpos=primera_comision.idpos,
             punto_de_venta=primera_comision.punto_de_venta,
             creado_por=request.user,
-            monto_total_pagado=(monto_real_pagado + monto_acumulado_usado),
+            monto_total_pagado=total_metodos,
             monto_comisiones=monto_comisiones,
-            metodos_pago=metodos_pago_original
+            metodos_pago=metodos_pago_normalizados,
         )
 
         # 1. Consolidar las comisiones originales que se están pagando
         comisiones_a_pagar.update(estado='Consolidada', pagos=pago)
 
+        # Determinar mes de referencia (liquidación) para los registros fantasma
+        mes_liq_ref = (
+            primera_comision.mes_liquidacion
+            or primera_comision.mes_pago
+            or timezone.now().date().replace(day=1)
+        )
+
         # 2. Si se usó saldo acumulado, crear un registro para reflejarlo
         if monto_acumulado_usado > 0:
             models.Comision.objects.create(
-                idpos=primera_comision.idpos, punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor, asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta, mes_pago=primera_comision.mes_pago,
-                comision_final=monto_acumulado_usado, estado='Acumulada',
-                producto=f"USO DE SALDO EN PAGO #{pago.id}", iccid=f"ACUM-{pago.id}",
-                pagos=pago
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=mes_liq_ref,
+                mes_liquidacion=mes_liq_ref,
+                comision_final=monto_acumulado_usado,  # siempre positivo
+                estado='Acumulada',
+                producto=f"USO DE SALDO EN PAGO #{pago.id}",
+                iccid=f"ACUM-{pago.id}",
+                pagos=pago,
             )
 
         # 3. Si se hizo un pago real (efectivo, etc.), crear la comisión 'Pagada'
         if monto_real_pagado > 0:
             models.Comision.objects.create(
-                idpos=primera_comision.idpos, punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor, asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta, mes_pago=primera_comision.mes_pago,
-                comision_final=monto_real_pagado, estado='Pagada',
-                producto=f"PAGO REGISTRADO #{pago.id}", iccid=f"PAGO-{pago.id}",
-                pagos=pago
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=mes_liq_ref,
+                mes_liquidacion=mes_liq_ref,
+                comision_final=monto_real_pagado,  # positivo
+                estado='Pagada',
+                producto=f"PAGO REGISTRADO #{pago.id}",
+                iccid=f"PAGO-{pago.id}",
+                pagos=pago,
             )
         
         # 4. Calcular el balance final y crear comisión de saldo si es necesario
-        restante = monto_comisiones - (monto_real_pagado + monto_acumulado_usado)
+        restante = monto_comisiones - total_metodos
 
-        if restante > 0: # Saldo faltante -> PENDIENTE
+        if restante > 0:
+            # Saldo faltante -> PENDIENTE positiva
             models.Comision.objects.create(
-                idpos=primera_comision.idpos, punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor, asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta, mes_pago=primera_comision.mes_pago,
-                comision_final=restante, estado='Pendiente',
-                producto=f"SALDO PENDIENTE PAGO #{pago.id}", iccid=f"SALDO-{pago.id}",
-                pagos=pago
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=mes_liq_ref,
+                mes_liquidacion=mes_liq_ref,
+                comision_final=restante,  # positivo
+                estado='Pendiente',
+                producto=f"SALDO PENDIENTE PAGO #{pago.id}",
+                iccid=f"SALDO-{pago.id}",
+                pagos=pago,
             )
-        elif restante < 0: # Hubo un sobrepago -> ACUMULADA (crédito a favor)
+        elif restante < 0:
+            # Hubo un sobrepago -> ACUMULADA (crédito a favor) POSITIVA
+            sobrante = abs(restante)
             models.Comision.objects.create(
-                idpos=primera_comision.idpos, punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor, asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta, estado='Acumulada',
-                comision_final=restante, # Será negativo
-                mes_pago=timezone.now().date(),
-                producto=f"AJUSTE POR SOBRANTE PAGO #{pago.id}", iccid=f"AJUSTE-{pago.id}",
-                pagos=pago
+                idpos=primera_comision.idpos,
+                punto_de_venta=primera_comision.punto_de_venta,
+                asesor=primera_comision.asesor,
+                asesor_identificador=primera_comision.asesor_identificador,
+                ruta=primera_comision.ruta,
+                mes_pago=mes_liq_ref,
+                mes_liquidacion=mes_liq_ref,
+                comision_final=sobrante,  # positivo
+                estado='Acumulada',
+                producto=f"AJUSTE POR SOBRANTE PAGO #{pago.id}",
+                iccid=f"AJUSTE-{pago.id}",
+                pagos=pago,
             )
             
     return Response({"mensaje": "Pago procesado con éxito."}, status=status.HTTP_200_OK)
+
 
 @api_view(['GET'])
 # @permission_classes([IsAuthenticated]) # Descomenta para proteger la vista
@@ -1241,32 +1484,47 @@ def fecha_corte_view(request):
 @asesor_permission_required
 def reporte_asesor_view(request):
     """
-    Genera el reporte para el asesor. Acepta un filtro por mes (YYYY-MM) y PDV.
-    Devuelve TODAS las comisiones (Pagada, Pendiente, Acumulada) que coincidan
-    con los filtros, con el detalle agrupado y los datos para las gráficas.
+    Genera el reporte para el asesor.
+
+    Filtros:
+      - mes: YYYY-MM
+      - idpos: opcional
+
+    Reglas:
+      - Usa la ruta del Perfil del usuario.
+      - Excluye comisiones 'Consolidada' (ya consolidadas en pagos).
+      - KPIs y gráficas imposibles de negativos (se clampean a >= 0).
     """
     try:
-        # 1. Asegura que el usuario tenga un perfil y obtiene su ruta
+        # 1. Perfil y ruta
         perfil, created = models.Perfil.objects.get_or_create(user=request.user)
         ruta_asesor = perfil.ruta_asignada
         if not ruta_asesor:
-            return Response({"error": "No tienes una ruta asignada en tu perfil."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "No tienes una ruta asignada en tu perfil."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         
-        # 2. Crea el queryset base filtrado por la ruta del asesor
-        base_queryset = models.Comision.objects.filter(ruta__iexact=ruta_asesor).exclude(estado='Consolidada')
+        # 2. Query base: por ruta, excluyendo 'Consolidada'
+        base_queryset = (
+            models.Comision.objects
+            .filter(ruta__iexact=ruta_asesor)
+            .exclude(estado='Consolidada')
+        )
 
-        # 3. Aplica los filtros de la interfaz de usuario
-        idpos_filtro = request.query_params.get('idpos', None)
-        mes_filtro = request.query_params.get('mes', None)
-        
-        queryset_con_filtros = base_queryset 
+        # 3. Filtros
+        idpos_filtro = request.query_params.get('idpos')
+        mes_filtro = request.query_params.get('mes')
 
+        queryset_con_filtros = base_queryset
+
+        # Cambiamos a mes_liquidacion como referencia temporal
         if mes_filtro:
             try:
-                fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
+                fecha_obj = datetime.strptime(mes_filtro, '%Y-%m').date()
                 queryset_con_filtros = queryset_con_filtros.filter(
-                    mes_pago__year=fecha_obj.year, 
-                    mes_pago__month=fecha_obj.month
+                    mes_liquidacion__year=fecha_obj.year,
+                    mes_liquidacion__month=fecha_obj.month
                 )
             except (ValueError, TypeError):
                 pass
@@ -1274,25 +1532,37 @@ def reporte_asesor_view(request):
         if idpos_filtro and idpos_filtro != 'todos':
             queryset_con_filtros = queryset_con_filtros.filter(idpos=idpos_filtro)
 
-        # 4. Agrupa los resultados para la tabla de detalle
-        # (El código de agrupación y paginación no cambia)
+        # 4. Agrupación para la tabla
         grouped_results = queryset_con_filtros.values(
             'mes_pago', 'asesor_identificador', 'producto', 'estado'
         ).annotate(
             cantidad=Count('id'),
             comision_final_total=Sum('comision_final'),
-            individual_ids=Coalesce(ArrayAgg('id'), Value([]))
+            individual_ids=Coalesce(ArrayAgg('id', distinct=True), Value([]))
         ).order_by('-mes_pago', 'asesor_identificador')
 
         resultados = []
         for item in grouped_results:
-            if item['cantidad'] == 0: continue
-            unique_id = f"agrupado-{item['estado']}-{item['mes_pago']}-{item['asesor_identificador']}-{item['producto']}"
+            if not item['cantidad']:
+                continue
+
+            unique_id = (
+                f"agrupado-{item['estado']}-"
+                f"{item['mes_pago']}-"
+                f"{item['asesor_identificador']}-"
+                f"{item['producto']}"
+            )
+
             resultados.append({
-                'id': unique_id, 'agrupado': True, 'asesor_identificador': item['asesor_identificador'],
-                'iccid': f"{item['cantidad']} ventas", 'producto': item['producto'],
-                'comision_final': item['comision_final_total'], 'estado': item['estado'],
-                'mes_pago': item['mes_pago'], 'individual_ids': item['individual_ids']
+                'id': unique_id,
+                'agrupado': True,
+                'asesor_identificador': item['asesor_identificador'],
+                'iccid': f"{item['cantidad']} ventas",
+                'producto': item['producto'],
+                'comision_final': item['comision_final_total'] or 0,
+                'estado': item['estado'],
+                'mes_pago': item['mes_pago'],
+                'individual_ids': item['individual_ids'],
             })
 
         paginator = PageNumberPagination()
@@ -1300,52 +1570,70 @@ def reporte_asesor_view(request):
         paginated_results = paginator.paginate_queryset(resultados, request)
         detalle_final = paginator.get_paginated_response(paginated_results).data
 
-        # 5. Cálculo de KPIs y datos para gráficos
-        kpis = queryset_con_filtros.aggregate(
+        # 5. KPIs y distribución
+        kpis_raw = queryset_con_filtros.aggregate(
             total_pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
-            total_pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
+            total_pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0),
         )
-        total_comisiones = (kpis.get('total_pagado') or 0) + (kpis.get('total_pendiente') or 0)
-        distribucion_estado = queryset_con_filtros.values('estado').annotate(count=Count('id')).order_by('estado')
 
-        # --- INICIO: CÓDIGO CORREGIDO PARA MÉTODOS DE PAGO ---
-        
-        # Obtenemos los IDs de los pagos asociados a las comisiones filtradas
+        total_pagado = decimal_or_zero(kpis_raw.get('total_pagado'))
+        total_pendiente = decimal_or_zero(kpis_raw.get('total_pendiente'))
+
+        # Evitar negativos por ajustes viejos
+        if total_pagado < 0:
+            total_pagado = Decimal('0')
+        if total_pendiente < 0:
+            total_pendiente = Decimal('0')
+
+        total_comisiones = total_pagado + total_pendiente
+
+        distribucion_estado_qs = (
+            queryset_con_filtros
+            .values('estado')
+            .annotate(count=Count('id'))
+            .order_by('estado')
+        )
+
+        distribucion_estado = list(distribucion_estado_qs)
+
+        # --- Métodos de pago (solo pagos ligados al queryset filtrado) ---
         pago_ids = queryset_con_filtros.filter(
-            estado='Pagada', pagos__isnull=False
+            estado='Pagada',
+            pagos__isnull=False
         ).values_list('pagos_id', flat=True).distinct()
-        
-        # Obtenemos los objetos PagoComision
+
         pagos_relevantes = models.PagoComision.objects.filter(id__in=pago_ids)
 
-        # Agregamos los valores de los JSONFields en Python
-        aggregated_methods = defaultdict(lambda: {'total_valor': 0, 'total_cantidad': 0})
+        aggregated_methods = defaultdict(lambda: {'total_valor': Decimal('0'), 'total_cantidad': 0})
+
         for pago in pagos_relevantes:
             if isinstance(pago.metodos_pago, dict):
                 for metodo, valor in pago.metodos_pago.items():
-                    aggregated_methods[metodo]['total_valor'] += valor
+                    valor_dec = decimal_or_zero(valor)
+                    aggregated_methods[metodo]['total_valor'] += valor_dec
                     aggregated_methods[metodo]['total_cantidad'] += 1
-        
-        # Convertimos el diccionario agregado al formato de lista esperado
+
         metodos_pago_stats = [
-            {'metodo': metodo, 'total_valor': data['total_valor'], 'total_cantidad': data['total_cantidad']}
+            {
+                'metodo': metodo,
+                'total_valor': float(max(data['total_valor'], Decimal('0'))),
+                'total_cantidad': max(data['total_cantidad'], 0),
+            }
             for metodo, data in aggregated_methods.items()
         ]
-        # Opcional: ordenar por valor
         metodos_pago_stats.sort(key=lambda x: x['total_valor'], reverse=True)
-        # --- FIN: CÓDIGO CORREGIDO ---
 
-        # 6. Respuesta Final
+        # 6. Respuesta final
         data = {
-            'kpis': { 
-                'totalPagado': kpis.get('total_pagado') or 0, 
-                'totalPendiente': kpis.get('total_pendiente') or 0, 
-                'totalComisiones': total_comisiones,
+            'kpis': {
+                'totalPagado': float(total_pagado),
+                'totalPendiente': float(total_pendiente),
+                'totalComisiones': float(total_comisiones),
             },
             'detalle': detalle_final,
             'chart_data': {
-                'distribucion_estado': list(distribucion_estado),
-                'metodos_pago': metodos_pago_stats # <-- Dato corregido
+                'distribucion_estado': distribucion_estado,
+                'metodos_pago': metodos_pago_stats,
             }
         }
         return Response(data)
@@ -1353,7 +1641,11 @@ def reporte_asesor_view(request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return Response({"error": f"Ha ocurrido un error inesperado: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(
+            {"error": f"Ha ocurrido un error inesperado: {str(e)}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
     
 @api_view(['GET'])
 @asesor_permission_required
