@@ -1521,10 +1521,10 @@ def reporte_asesor_view(request):
         # Cambiamos a mes_liquidacion como referencia temporal
         if mes_filtro:
             try:
-                fecha_obj = datetime.strptime(mes_filtro, '%Y-%m').date()
+                fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
                 queryset_con_filtros = queryset_con_filtros.filter(
-                    mes_liquidacion__year=fecha_obj.year,
-                    mes_liquidacion__month=fecha_obj.month
+                    mes_pago__year=fecha_obj.year,
+                    mes_pago__month=fecha_obj.month
                 )
             except (ValueError, TypeError):
                 pass
@@ -1533,7 +1533,7 @@ def reporte_asesor_view(request):
             queryset_con_filtros = queryset_con_filtros.filter(idpos=idpos_filtro)
 
         # 4. Agrupación para la tabla
-        grouped_results = queryset_con_filtros.values(
+        grouped_results = queryset_con_filtros.values(  
             'mes_pago', 'asesor_identificador', 'producto', 'estado'
         ).annotate(
             cantidad=Count('id'),
