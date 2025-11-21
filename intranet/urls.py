@@ -91,4 +91,6 @@ urlpatterns = [
     path('admin/pagos/', views.admin_pago_list, name='admin-pago-list'),
     path('admin/pagos/<int:pk>/', views.admin_pago_detail, name='admin-pago-detail'),
     path('admin/puntos-de-venta/', views.admin_puntos_de_venta_list, name='admin-puntos-de-venta-list'),
+    path('asesor/subir-comprobante/', views.subir_comprobante_view, name='subir-comprobante'),
+    path('asesor/get-comprobante/', views.get_comprobante_view, name='get-comprobante'),
 ]

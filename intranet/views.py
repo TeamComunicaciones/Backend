@@ -95,6 +95,8 @@ from .serializers import (
 from .services import process_sales_report_file
 from .tasks import procesar_archivo_comisiones
 from .permissions import admin_permission_required # Asegúrate de que esta importación sea correcta
+from .sharepoint_utils import upload_comision_image
+from .sharepoint_utils import download_comision_image
 
 # --- Helpers para decimales/KPIs y lógica de pagos ---
 
@@ -503,6 +505,16 @@ def admin_pago_detail(request, pk):
     """
     PUT: Actualiza un pago de comisiones.
     DELETE: Reversa un pago (borra el PagoComision y reajusta Comision).
+
+    Reverso (DELETE):
+      - Comisiones 'ledger' creadas por el pago
+        (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO) -> se BORRAN.
+
+      - Comisiones originales (las del Excel):
+          * estado  -> 'Pendiente' (o lo que definas)
+          * pagos   -> None
+          * mes_pago -> se ajusta al MISMO mes que tenían las ledger
+                       (o, si no hay ledger, al mes de fecha_pago del PagoComision).
     """
     try:
         pago = PagoComision.objects.get(pk=pk)
@@ -563,37 +575,54 @@ def admin_pago_detail(request, pk):
     # --- REVERSAR PAGO ---
     elif request.method == 'DELETE':
         """
-        Reverso robusto:
+        Reverso:
 
-        - Comisiones originales (las del Excel) -> estado='Pendiente',
-          pagos=None, mes_pago = mes_liquidacion (si existe) o None.
-
-        - Comisiones 'fantasma' creadas por el pago
-          (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO) -> se borran.
-
-        - Luego se elimina el PagoComision.
+        - Borrar comisiones ledger del pago.
+        - Dejar comisiones originales como 'Pendiente' en el MISMO mes
+          en el que estaban cuando se registró el pago (mes de las ledger),
+          o si no hay ledger, en el mes de fecha_pago del PagoComision.
         """
         try:
             with transaction.atomic():
-                comisiones_relacionadas = pago.comisiones_pagadas.all()
+                # Bloqueamos todas las comisiones ligadas al pago
+                comisiones_relacionadas = list(
+                    pago.comisiones_pagadas.select_for_update().all()
+                )
 
+                # 1) Determinar el mes destino (mes donde deben quedar pendientes)
+                mes_pago_destino = None
+
+                # a) Preferimos usar el mes_pago de alguna comisión ledger
+                ledger_comisiones = [c for c in comisiones_relacionadas if es_comision_ledger(c)]
+                if ledger_comisiones:
+                    # Tomamos el mes_pago de la primera ledger como referencia
+                    lp = ledger_comisiones[0].mes_pago
+                    if lp is not None:
+                        # Normalizamos al primer día del mes (opcional)
+                        mes_pago_destino = lp.replace(day=1)
+
+                # b) Si no hubiera ledger (caso raro), usamos fecha_pago del PagoComision
+                if mes_pago_destino is None and pago.fecha_pago:
+                    fp = pago.fecha_pago.date()
+                    mes_pago_destino = fp.replace(day=1)
+
+                # 2) Procesar comisiones
                 for com in comisiones_relacionadas:
                     if es_comision_ledger(com):
-                        # Es un registro artificial ligado al pago → se borra
+                        # Registro artificial (PAGO REGISTRADO, SALDO PENDIENTE, etc.) → se borra
                         com.delete()
                     else:
-                        # Comisión original → se revierte
-                        com.estado = 'Pendiente'
+                        # Comisión original: la devolvemos a Pendiente en el mes destino
+                        com.estado = 'Pendiente'  # o 'Acumulada' según tu negocio
                         com.pagos = None
 
-                        # Se devuelve al mes de liquidación original, si existe
-                        if com.mes_liquidacion:
-                            com.mes_pago = com.mes_liquidacion
-                        else:
-                            com.mes_pago = None
+                        # Si tenemos mes_destino, movemos la comisión a ese mes
+                        if mes_pago_destino is not None:
+                            com.mes_pago = mes_pago_destino
 
                         com.save()
 
+                # 3) Borrar el PagoComision
                 pago.delete()
 
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -1021,7 +1050,8 @@ def pagar_comisiones_view(request):
             "Nequi": 10000,
             "Recarga": 5000,
             "Acumulado": 2000
-        }
+        },
+        "soporte": "nombre_archivo_en_sharepoint.ext"  # OPCIONAL
     }
 
     Reglas:
@@ -1034,6 +1064,9 @@ def pagar_comisiones_view(request):
     """
     comision_ids = request.data.get('comision_ids', [])
     metodos_pago_original = request.data.get('metodos_pago', {})
+
+    # soporte opcional (nombre de archivo en SharePoint)
+    soporte = request.data.get('soporte')
 
     if not comision_ids or not metodos_pago_original:
         return Response(
@@ -1098,7 +1131,23 @@ def pagar_comisiones_view(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Creamos el PagoComision
+        # 🔹 Meses de referencia para los registros fantasma
+
+        # Mes "visual" para el dashboard (Mes Pago que ves en el filtro/front)
+        mes_pago_ref = (
+            primera_comision.mes_pago
+            or primera_comision.mes_liquidacion
+            or timezone.now().date().replace(day=1)
+        )
+
+        # Mes histórico de liquidación / origen
+        mes_liq_ref = (
+            primera_comision.mes_liquidacion
+            or primera_comision.mes_pago
+            or timezone.now().date().replace(day=1)
+        )
+
+        # Creamos el PagoComision (guarda también el comprobante si viene)
         pago = models.PagoComision.objects.create(
             idpos=primera_comision.idpos,
             punto_de_venta=primera_comision.punto_de_venta,
@@ -1106,17 +1155,11 @@ def pagar_comisiones_view(request):
             monto_total_pagado=total_metodos,
             monto_comisiones=monto_comisiones,
             metodos_pago=metodos_pago_normalizados,
+            comprobante_url=soporte or None,
         )
 
         # 1. Consolidar las comisiones originales que se están pagando
         comisiones_a_pagar.update(estado='Consolidada', pagos=pago)
-
-        # Determinar mes de referencia (liquidación) para los registros fantasma
-        mes_liq_ref = (
-            primera_comision.mes_liquidacion
-            or primera_comision.mes_pago
-            or timezone.now().date().replace(day=1)
-        )
 
         # 2. Si se usó saldo acumulado, crear un registro para reflejarlo
         if monto_acumulado_usado > 0:
@@ -1126,8 +1169,8 @@ def pagar_comisiones_view(request):
                 asesor=primera_comision.asesor,
                 asesor_identificador=primera_comision.asesor_identificador,
                 ruta=primera_comision.ruta,
-                mes_pago=mes_liq_ref,
-                mes_liquidacion=mes_liq_ref,
+                mes_pago=mes_pago_ref,          # 👈 Mes pago visible (ej. noviembre)
+                mes_liquidacion=mes_liq_ref,    # 👈 Mes origen/histórico (ej. agosto)
                 comision_final=monto_acumulado_usado,  # siempre positivo
                 estado='Acumulada',
                 producto=f"USO DE SALDO EN PAGO #{pago.id}",
@@ -1143,7 +1186,7 @@ def pagar_comisiones_view(request):
                 asesor=primera_comision.asesor,
                 asesor_identificador=primera_comision.asesor_identificador,
                 ruta=primera_comision.ruta,
-                mes_pago=mes_liq_ref,
+                mes_pago=mes_pago_ref,
                 mes_liquidacion=mes_liq_ref,
                 comision_final=monto_real_pagado,  # positivo
                 estado='Pagada',
@@ -1163,7 +1206,7 @@ def pagar_comisiones_view(request):
                 asesor=primera_comision.asesor,
                 asesor_identificador=primera_comision.asesor_identificador,
                 ruta=primera_comision.ruta,
-                mes_pago=mes_liq_ref,
+                mes_pago=mes_pago_ref,
                 mes_liquidacion=mes_liq_ref,
                 comision_final=restante,  # positivo
                 estado='Pendiente',
@@ -1180,7 +1223,7 @@ def pagar_comisiones_view(request):
                 asesor=primera_comision.asesor,
                 asesor_identificador=primera_comision.asesor_identificador,
                 ruta=primera_comision.ruta,
-                mes_pago=mes_liq_ref,
+                mes_pago=mes_pago_ref,
                 mes_liquidacion=mes_liq_ref,
                 comision_final=sobrante,  # positivo
                 estado='Acumulada',
@@ -1190,7 +1233,6 @@ def pagar_comisiones_view(request):
             )
             
     return Response({"mensaje": "Pago procesado con éxito."}, status=status.HTTP_200_OK)
-
 
 @api_view(['GET'])
 # @permission_classes([IsAuthenticated]) # Descomenta para proteger la vista
@@ -1494,6 +1536,9 @@ def reporte_asesor_view(request):
       - Usa la ruta del Perfil del usuario.
       - Excluye comisiones 'Consolidada' (ya consolidadas en pagos).
       - KPIs y gráficas imposibles de negativos (se clampean a >= 0).
+      - El filtro de mes considera:
+          * Comision.mes_pago
+          * O PagoComision.fecha_pago (movimientos de pago en ese mes)
     """
     try:
         # 1. Perfil y ruta
@@ -1518,28 +1563,84 @@ def reporte_asesor_view(request):
 
         queryset_con_filtros = base_queryset
 
-        # Cambiamos a mes_liquidacion como referencia temporal
         if mes_filtro:
             try:
                 fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
+
+                # Mes pago de la comisión o mes de la fecha de pago del PagoComision
                 queryset_con_filtros = queryset_con_filtros.filter(
-                    mes_pago__year=fecha_obj.year,
-                    mes_pago__month=fecha_obj.month
+                    Q(mes_pago__year=fecha_obj.year, mes_pago__month=fecha_obj.month) |
+                    Q(pagos__fecha_pago__year=fecha_obj.year, pagos__fecha_pago__month=fecha_obj.month)
                 )
+
             except (ValueError, TypeError):
                 pass
         
         if idpos_filtro and idpos_filtro != 'todos':
             queryset_con_filtros = queryset_con_filtros.filter(idpos=idpos_filtro)
 
-        # 4. Agrupación para la tabla
-        grouped_results = queryset_con_filtros.values(  
-            'mes_pago', 'asesor_identificador', 'producto', 'estado'
-        ).annotate(
-            cantidad=Count('id'),
-            comision_final_total=Sum('comision_final'),
-            individual_ids=Coalesce(ArrayAgg('id', distinct=True), Value([]))
-        ).order_by('-mes_pago', 'asesor_identificador')
+        # Si no hay nada tras filtros, respondemos rápido
+        if not queryset_con_filtros.exists():
+            data = {
+                "kpis": {
+                    "totalPagado": 0.0,
+                    "totalPendiente": 0.0,
+                    "totalComisiones": 0.0
+                },
+                "detalle": {
+                    "count": 0,
+                    "next": None,
+                    "previous": None,
+                    "results": []
+                },
+                "chart_data": {
+                    "distribucion_estado": [],
+                    "metodos_pago": []
+                }
+            }
+            return Response(data)
+
+        # 4. Precalcular comprobantes por grupo (UN SOLO QUERY)
+        # Clave: (mes_pago, asesor_identificador, producto, estado)
+        comprobantes_por_grupo = {}
+
+        pagadas_con_comprobante = (
+            queryset_con_filtros
+            .filter(
+                estado='Pagada',
+                pagos__isnull=False,
+                pagos__comprobante_url__isnull=False,
+            )
+            .values(
+                'mes_pago',
+                'asesor_identificador',
+                'producto',
+                'estado',
+                'pagos__comprobante_url',
+            )
+            .distinct()
+        )
+
+        for row in pagadas_con_comprobante:
+            key = (
+                row['mes_pago'],
+                row['asesor_identificador'],
+                row['producto'],
+                row['estado'],
+            )
+            comprobantes_por_grupo[key] = row['pagos__comprobante_url']
+
+        # 5. Agrupación para la tabla
+        grouped_results = (
+            queryset_con_filtros
+            .values('mes_pago', 'asesor_identificador', 'producto', 'estado')
+            .annotate(
+                cantidad=Count('id'),
+                comision_final_total=Sum('comision_final'),
+                individual_ids=Coalesce(ArrayAgg('id', distinct=True), Value([])),
+            )
+            .order_by('-mes_pago', 'asesor_identificador')
+        )
 
         resultados = []
         for item in grouped_results:
@@ -1553,6 +1654,14 @@ def reporte_asesor_view(request):
                 f"{item['producto']}"
             )
 
+            key = (
+                item['mes_pago'],
+                item['asesor_identificador'],
+                item['producto'],
+                item['estado'],
+            )
+            comprobante_url = comprobantes_por_grupo.get(key)
+
             resultados.append({
                 'id': unique_id,
                 'agrupado': True,
@@ -1563,6 +1672,7 @@ def reporte_asesor_view(request):
                 'estado': item['estado'],
                 'mes_pago': item['mes_pago'],
                 'individual_ids': item['individual_ids'],
+                'comprobante_url': comprobante_url,
             })
 
         paginator = PageNumberPagination()
@@ -1570,7 +1680,7 @@ def reporte_asesor_view(request):
         paginated_results = paginator.paginate_queryset(resultados, request)
         detalle_final = paginator.get_paginated_response(paginated_results).data
 
-        # 5. KPIs y distribución
+        # 6. KPIs y distribución
         kpis_raw = queryset_con_filtros.aggregate(
             total_pagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
             total_pendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0),
@@ -1579,7 +1689,6 @@ def reporte_asesor_view(request):
         total_pagado = decimal_or_zero(kpis_raw.get('total_pagado'))
         total_pendiente = decimal_or_zero(kpis_raw.get('total_pendiente'))
 
-        # Evitar negativos por ajustes viejos
         if total_pagado < 0:
             total_pagado = Decimal('0')
         if total_pendiente < 0:
@@ -1623,7 +1732,7 @@ def reporte_asesor_view(request):
         ]
         metodos_pago_stats.sort(key=lambda x: x['total_valor'], reverse=True)
 
-        # 6. Respuesta final
+        # 7. Respuesta final
         data = {
             'kpis': {
                 'totalPagado': float(total_pagado),
@@ -1645,7 +1754,6 @@ def reporte_asesor_view(request):
             {"error": f"Ha ocurrido un error inesperado: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-
     
 @api_view(['GET'])
 @asesor_permission_required
@@ -2677,7 +2785,65 @@ def assign_responsible(request):
             {'error': f'La sucursal con terminal "{sucursal}" no existe.'},
             status=status.HTTP_404_NOT_FOUND
         )
+        
+        
+@api_view(['POST'])
+@asesor_permission_required
+@parser_classes([MultiPartParser, FormParser])
+def subir_comprobante_view(request):
+    """
+    Recibe un archivo (field name: 'file') y lo sube a SharePoint.
+    Devuelve el nombre de archivo (filename) que luego se manda como 'soporte'
+    en pagar_comisiones_view.
+    """
+    file_obj = request.FILES.get('file')
 
+    if not file_obj:
+        return Response(
+            {"error": "No se recibió ningún archivo."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        data = upload_comision_image(file_obj)
+    except Exception as e:
+        return Response(
+            {"error": f"Error subiendo comprobante: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    return Response(
+        {
+            "filename": data["filename"],
+            "web_url": data.get("web_url"),
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(['POST'])
+@asesor_permission_required
+def get_comprobante_view(request):
+    """
+    Recibe { "url": "nombre_de_archivo.ext" } y devuelve la imagen en base64
+    y el content_type para que el front la pinte.
+    """
+    file_name = request.data.get('url')
+
+    if not file_name:
+        return JsonResponse({"error": "No se envió el parámetro 'url'."}, status=400)
+
+    try:
+        image_b64, content_type = download_comision_image(file_name)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+    return JsonResponse(
+        {"image": image_b64, "content_type": content_type},
+        status=200
+    )
+    
+  
 
 @api_view(['POST'])
 def get_image_corresponsal(request):

@@ -191,3 +191,11 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')  # ¡Usa variables de entorno!
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD') # ¡Usa variables de entorno!
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+GRAPH_TENANT_ID = "69002990-8016-415d-a552-cd21c7ad750c"
+GRAPH_CLIENT_ID = "46a313cf-1a14-4d9a-8b79-9679cc6caeec"
+GRAPH_CLIENT_SECRET = "vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1"  
+
+# Site de https://teamcommunicationsa.sharepoint.com/sites/ImgComisiones
+SHAREPOINT_COMISIONES_SITE_ID = "teamcommunicationsa.sharepoint.com,22796513-d288-4c5c-b76f-33a5b06152ed,43aa0dd9-70d7-449b-9e18-8f9285049df4"
+SHAREPOINT_COMISIONES_FOLDER = "Comprobantes"  # carpeta dentro de "Documentos compartidos"

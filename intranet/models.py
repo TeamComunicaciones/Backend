@@ -224,6 +224,14 @@ class PagoComision(models.Model):
     # Nuevo campo para observaciones
     observacion = models.TextField(blank=True, null=True)
 
+    # 🔴 NUEVO: nombre del archivo del comprobante en SharePoint
+    comprobante_url = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Nombre del archivo del comprobante almacenado en SharePoint"
+    )
+
     def __str__(self):
         usuario = self.creado_por.username if self.creado_por else "Usuario Desconocido"
         return f"Pago por {usuario} de {self.monto_total_pagado} el {self.fecha_pago.strftime('%Y-%m-%d')}"
