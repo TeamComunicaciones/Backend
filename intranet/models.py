@@ -294,3 +294,47 @@ class Comision(models.Model):
         verbose_name = "Comisión"
         verbose_name_plural = "Comisiones"
         ordering = ['-prim_llamada_activacion']
+        
+# ---------------- ROLES PARA COMISIONES ----------------
+
+# Nombres EXACTOS como están en la tabla Permisos.permiso
+PERMISO_ASESOR_COMISIONES = "asesor_comisiones"
+PERMISO_SUPERVISOR_COMISIONES = "supervisor_comisiones"
+
+
+def user_tiene_permiso_comisiones(user, permiso_name: str) -> bool:
+    """
+    Verifica si el usuario tiene un permiso activo en Permisos_usuarios
+    con el nombre indicado en Permisos.permiso.
+    """
+    if not user or not user.is_authenticated:
+        return False
+
+    return Permisos_usuarios.objects.filter(
+        user=user,
+        permiso__permiso=permiso_name,
+        permiso__active=True,
+        tiene_permiso=True
+    ).exists()
+
+
+def user_es_asesor_comisiones(user) -> bool:
+    return user_tiene_permiso_comisiones(user, PERMISO_ASESOR_COMISIONES)
+
+
+def user_es_supervisor_comisiones(user) -> bool:
+    return user_tiene_permiso_comisiones(user, PERMISO_SUPERVISOR_COMISIONES)
+
+class RutaAsignada(models.Model):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='rutas_comisiones'
+    )
+    ruta = models.CharField(max_length=100)
+
+    class Meta:
+        unique_together = ('user', 'ruta')
+
+    def __str__(self):
+        return f'{self.user.username} - {self.ruta}'

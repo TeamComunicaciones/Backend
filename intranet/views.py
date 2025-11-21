@@ -20,6 +20,12 @@ from datetime import datetime, date, timedelta, time
 from decimal import Decimal, InvalidOperation
 from functools import reduce, wraps
 from io import BytesIO
+from .models import (
+    user_es_asesor_comisiones,
+    user_es_supervisor_comisiones,
+    PERMISO_ASESOR_COMISIONES,
+    PERMISO_SUPERVISOR_COMISIONES,
+)
 
 # Third-party utility libraries
 import numpy as np
@@ -97,6 +103,23 @@ from .tasks import procesar_archivo_comisiones
 from .permissions import admin_permission_required # Asegúrate de que esta importación sea correcta
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
+from rest_framework.views import APIView
+
+class MisRolesView(APIView):
+    """
+    Devuelve los roles/permiso del usuario para comisiones.
+    Ejemplo respuesta: {"roles": ["asesor_comisiones"]} o ["supervisor_comisiones"]
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        roles = []
+        if user_es_asesor_comisiones(request.user):
+            roles.append(PERMISO_ASESOR_COMISIONES)
+        if user_es_supervisor_comisiones(request.user):
+            roles.append(PERMISO_SUPERVISOR_COMISIONES)
+        return Response({"roles": roles})
+
 
 # --- Helpers para decimales/KPIs y lógica de pagos ---
 
@@ -142,22 +165,20 @@ def es_comision_ledger(comision_obj):
 
 
 def _get_asesor_user_queryset():
-    """Helper para obtener solo usuarios con permiso de asesor."""
-    asesor_user_ids = Permisos_usuarios.objects.filter(
-        permiso__permiso='asesor_comisiones', 
-        tiene_permiso=True
+    user_ids = Permisos_usuarios.objects.filter(
+        permiso__permiso__in=['asesor_comisiones', 'supervisor_comisiones'],
+        tiene_permiso=True,
+        permiso__active=True,
     ).values_list('user_id', flat=True)
-    
-    # Apuntamos a 'perfil' como en tu models.py
-    return User.objects.filter(id__in=asesor_user_ids).select_related('perfil')
 
+    return User.objects.filter(id__in=user_ids).distinct()
 
 @api_view(['GET', 'POST'])
 @admin_permission_required
 def asesor_list_create(request):
     """
-    GET: Lista todos los usuarios que SON asesores.
-    POST: Crea un nuevo usuario Asesor.
+    GET: Lista asesores/supervisores de comisiones.
+    POST: Crea un nuevo asesor/supervisor.
     """
     if request.method == 'GET':
         asesores = _get_asesor_user_queryset()
@@ -167,8 +188,9 @@ def asesor_list_create(request):
     elif request.method == 'POST':
         serializer = AsesorSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            asesor = serializer.save()
+            # Volvemos a serializar para devolver representación completa (con rol, rutas_asignadas, etc.)
+            return Response(AsesorSerializer(asesor).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -176,21 +198,21 @@ def asesor_list_create(request):
 @admin_permission_required
 def asesor_detail(request, pk):
     """
-    PUT: Actualiza los datos de un asesor (username, email, ruta).
-    DELETE: Elimina un asesor.
+    PUT: Actualiza los datos de un asesor/supervisor (username, email, rol, rutas_asignadas).
+    DELETE: Elimina un asesor/supervisor.
     """
     try:
-        # Nos aseguramos de que solo podamos actuar sobre asesores
+        # Nos aseguramos de que solo podamos actuar sobre usuarios con rol de comisiones
         user = _get_asesor_user_queryset().get(pk=pk)
     except User.DoesNotExist:
-        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_44_NOT_FOUND)
+        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'PUT':
-        # Usamos partial=True para que se pueda actualizar solo la ruta si se desea
+        # Puedes usar partial=True para permitir updates parciales.
         serializer = AsesorSerializer(user, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data)
+            asesor = serializer.save()
+            return Response(AsesorSerializer(asesor).data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     elif request.method == 'DELETE':
@@ -198,32 +220,34 @@ def asesor_detail(request, pk):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+
 @api_view(['PATCH'])
 @admin_permission_required
 def asesor_toggle_active(request, pk):
     """
-    PATCH: Activa o desactiva un asesor.
+    PATCH: Activa o desactiva un asesor/supervisor.
     Espera: { "is_active": true/false }
     """
     try:
         user = _get_asesor_user_queryset().get(pk=pk)
     except User.DoesNotExist:
-        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_44_NOT_FOUND)
+        return Response({'detail': 'Asesor no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
     is_active = request.data.get('is_active')
     if is_active is None:
         return Response(
-            {'detail': 'El campo "is_active" es requerido.'}, 
+            {'detail': 'El campo "is_active" es requerido.'},
             status=status.HTTP_400_BAD_REQUEST
         )
 
     user.is_active = bool(is_active)
     user.save(update_fields=['is_active'])
-    
+
     return Response(
         {'detail': 'Estado actualizado.', 'is_active': user.is_active},
         status=status.HTTP_200_OK
     )
+
 
 
 def token_required(view_func):
@@ -261,45 +285,74 @@ def token_required(view_func):
         
     return wrapper
 
-def asesor_permission_required(view_func):
-    @wraps(view_func)
-    def wrapper(request, *args, **kwargs):
-        try:
-            auth_header = request.headers.get('Authorization')
-            if not auth_header or not auth_header.startswith('Bearer '):
-                raise AuthenticationFailed('Token no proporcionado o con formato incorrecto.')
-            
-            token = auth_header.split(' ')[1]
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-            
-            # --- LÍNEA CORREGIDA ---
-            # 1. Obtenemos el ID del token
-            user_id = payload.get('id')
-            if not user_id:
-                raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
+def asesor_permission_required(view_func=None, *, allow_supervisor=False):
+    """
+    Decorador para endpoints de comisiones.
 
-            # 2. Buscamos al usuario por su ID numérico
-            user = User.objects.get(id=user_id)
-            
-            # Asignamos el usuario encontrado a la petición para que las vistas lo puedan usar
-            request.user = user
-            
-            # Verificamos que el usuario tenga el permiso específico de "asesor"
-            if not Permisos_usuarios.objects.filter(user=user, permiso__permiso='asesor_comisiones', tiene_permiso=True).exists():
-                raise AuthenticationFailed('No tienes los permisos de Asesor necesarios para acceder a este recurso.')
-            
-            # Si todo está bien, ejecutamos la vista original
-            return view_func(request, *args, **kwargs)
+    - Por defecto (allow_supervisor=False):
+        SOLO usuarios con permiso 'asesor_comisiones' pasan.
+    - Si allow_supervisor=True:
+        pasan usuarios con 'asesor_comisiones' O 'supervisor_comisiones'.
+    """
 
-        # Capturamos todos los posibles errores de autenticación/permisos
-        except (jwt.InvalidTokenError, jwt.ExpiredSignatureError, AuthenticationFailed, User.DoesNotExist) as e:
-            # Devolvemos una respuesta de error clara
-            return Response({'detail': str(e)}, status=403)
-        except Exception as e:
-            # Captura para cualquier otro error inesperado
-            return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
-            
-    return wrapper
+    def decorator(inner_view):
+        @wraps(inner_view)
+        def wrapper(request, *args, **kwargs):
+            try:
+                auth_header = request.headers.get('Authorization')
+                if not auth_header or not auth_header.startswith('Bearer '):
+                    raise AuthenticationFailed('Token no proporcionado o con formato incorrecto.')
+                
+                token = auth_header.split(' ')[1]
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+                
+                # 1. Obtenemos el ID del token
+                user_id = payload.get('id')
+                if not user_id:
+                    raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
+
+                # 2. Buscamos al usuario por su ID numérico
+                user = User.objects.get(id=user_id)
+
+                # Asignamos el usuario a la request para que la vista lo use
+                request.user = user
+
+                # ---- Validación de permisos ----
+                qs = Permisos_usuarios.objects.filter(
+                    user=user,
+                    tiene_permiso=True,
+                    permiso__active=True,
+                )
+
+                if allow_supervisor:
+                    # Acepta asesor_comisiones o supervisor_comisiones
+                    if not qs.filter(permiso__permiso__in=['asesor_comisiones', 'supervisor_comisiones']).exists():
+                        raise AuthenticationFailed(
+                            'No tienes los permisos necesarios para acceder a este recurso.'
+                        )
+                else:
+                    # SOLO asesor_comisiones
+                    if not qs.filter(permiso__permiso='asesor_comisiones').exists():
+                        raise AuthenticationFailed(
+                            'No tienes los permisos de Asesor necesarios para acceder a este recurso.'
+                        )
+
+                # Si todo está bien, ejecutamos la vista original
+                return inner_view(request, *args, **kwargs)
+
+            except (jwt.InvalidTokenError, jwt.ExpiredSignatureError, AuthenticationFailed, User.DoesNotExist) as e:
+                return Response({'detail': str(e)}, status=403)
+            except Exception as e:
+                return Response({'detail': f'Ocurrió un error interno: {str(e)}'}, status=500)
+
+        return wrapper
+
+    # Soporta uso con y sin paréntesis:
+    # @asesor_permission_required
+    # @asesor_permission_required(allow_supervisor=True)
+    if view_func is None:
+        return decorator
+    return decorator(view_func)
 
 def cajero_permission_required(view_func):
     """
@@ -863,7 +916,7 @@ from django.db.models import Sum, Q
 # ... y los demás imports que ya usas
 
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True)
 def reporte_comparativa_view(request):
     """
     Genera datos para el gráfico comparativo (mes actual vs anterior).
@@ -1523,7 +1576,7 @@ def fecha_corte_view(request):
 
 
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True)
 def reporte_asesor_view(request):
     """
     Genera el reporte para el asesor.
@@ -1756,7 +1809,7 @@ def reporte_asesor_view(request):
         )
     
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True)
 def filtros_reporte_view(request):
     """
     Devuelve los filtros para el dashboard del asesor.
@@ -2822,7 +2875,7 @@ def subir_comprobante_view(request):
 
 
 @api_view(['POST'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True)
 def get_comprobante_view(request):
     """
     Recibe { "url": "nombre_de_archivo.ext" } y devuelve la imagen en base64
@@ -4860,7 +4913,7 @@ def translate_prepago(requests):
 
         return Response({'validate': validate, 'data': data_response, 'crediminuto': [], 'cabecera': cabecera})
 
-from rest_framework.views import APIView
+
 
 class ListaProductosPrepagoEquipo(APIView):
     def post(self, request, format=None):
