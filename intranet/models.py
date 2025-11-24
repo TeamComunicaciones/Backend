@@ -338,3 +338,10 @@ class RutaAsignada(models.Model):
 
     def __str__(self):
         return f'{self.user.username} - {self.ruta}'
+    
+class IvaExcepcion(models.Model):
+    producto = models.CharField(max_length=255, unique=True)
+    tipo = models.CharField(max_length=50, default='prepago')  # por si luego usas pospago, etc.
+
+    def __str__(self):
+        return f"{self.producto} ({self.tipo})"

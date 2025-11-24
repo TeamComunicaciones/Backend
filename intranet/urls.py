@@ -52,11 +52,11 @@ urlpatterns = [
     path('settle-invoice', views.settle_invoice),
     path('black-list', views.black_list),
     path('black-list/<int:id>/', views.black_list),
-    path('prices', views.prices),
+    path('prices/', views.prices),
     path('prices/<int:id>/', views.prices),
-    path('variables', views.variables_prices),
+    path('variables/', views.variables_prices),
     path('variables/<int:id>/', views.variables_prices),
-    path('formulas', views.formulas_prices),
+    path('formulas/', views.formulas_prices),
     path('formulas/<int:id>/', views.formulas_prices),
     path('actas/', actas_entrega, name='actas_entrega'),  # Para GET y POST
     path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),  # Para GET, PUT, DELETE con id
@@ -93,4 +93,7 @@ urlpatterns = [
     path('admin/puntos-de-venta/', views.admin_puntos_de_venta_list, name='admin-puntos-de-venta-list'),
     path('asesor/subir-comprobante/', views.subir_comprobante_view, name='subir-comprobante'),
     path('asesor/get-comprobante/', views.get_comprobante_view, name='get-comprobante'),
+    path('admin/usuarios/activar/', views.toggle_user_active, name='toggle_user_active'),
+    path('admin/cajeros/rol-caja/', views.toggle_cajero_role, name='toggle_cajero_role'),
+    path('admin/usuarios/<str:username>/', views.usuario_detail, name='usuario_detail'),
 ]

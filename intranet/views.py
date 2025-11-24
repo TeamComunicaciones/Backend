@@ -70,6 +70,8 @@ from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import Value
+from .models import Permisos, Permisos_usuarios
+
 
 
 
@@ -2839,6 +2841,154 @@ def assign_responsible(request):
             status=status.HTTP_404_NOT_FOUND
         )
         
+@api_view(['POST'])
+def toggle_user_active(request):
+    """
+    Cambia el estado is_active de un usuario.
+    Payload esperado:
+      {
+        "username": "usuario123",
+        "is_active": true/false
+      }
+    """
+    username = request.data.get('username')
+    is_active = request.data.get('is_active')
+
+    if username is None or is_active is None:
+        return Response(
+            {'error': 'Los campos "username" e "is_active" son requeridos.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    user.is_active = bool(is_active)
+    user.save()
+
+    return Response(
+        {'status': 'ok', 'username': username, 'is_active': user.is_active},
+        status=status.HTTP_200_OK
+    )
+    
+@api_view(['POST'])
+def toggle_cajero_role(request):
+    """
+    Activa o desactiva el rol 'Cajero' (permiso id=11) para un usuario.
+    Payload esperado:
+      {
+        "username": "usuario123",
+        "tiene_caja": true/false
+      }
+    """
+    username = request.data.get('username')
+    tiene_caja = request.data.get('tiene_caja')
+
+    if username is None or tiene_caja is None:
+        return Response(
+            {'error': 'Los campos "username" y "tiene_caja" son requeridos.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Aseguramos que el permiso exista
+    try:
+        permiso_caja = models.Permisos.objects.get(id=PERMISO_CAJA_ID)
+    except models.Permisos.DoesNotExist:
+        return Response(
+            {'error': f'No existe un permiso con id={PERMISO_CAJA_ID} para Cajero.'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    tiene_caja_bool = bool(tiene_caja)
+
+    # Si lo marcamos como Cajero -> tiene_permiso=True
+    # Si lo desmarcamos -> tiene_permiso=False
+    models.Permisos_usuarios.objects.update_or_create(
+        user=user,
+        permiso=permiso_caja,
+        defaults={'tiene_permiso': tiene_caja_bool}
+    )
+
+    return Response(
+        {'status': 'ok', 'username': username, 'tiene_caja': tiene_caja_bool},
+        status=status.HTTP_200_OK
+    )
+
+from django.db import IntegrityError
+
+@api_view(['GET', 'PUT', 'DELETE'])
+@admin_permission_required
+def usuario_detail(request, username):
+    """
+    Gestión básica de usuarios para panel de Cajeros:
+      - GET: devuelve info básica
+      - PUT: edita username, first_name, last_name
+      - DELETE: elimina el usuario
+    """
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == 'GET':
+        data = {
+            'id': user.id,
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'is_active': user.is_active,
+        }
+        return Response(data)
+
+    elif request.method == 'PUT':
+        nuevo_username = request.data.get('username', user.username)
+        first_name = request.data.get('first_name', user.first_name)
+        last_name = request.data.get('last_name', user.last_name)
+
+        user.username = nuevo_username
+        user.first_name = first_name
+        user.last_name = last_name
+
+        try:
+            user.save()
+        except IntegrityError:
+            return Response(
+                {'error': 'Ya existe un usuario con ese username.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        return Response(
+            {
+                'status': 'ok',
+                'id': user.id,
+                'username': user.username,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+            },
+            status=status.HTTP_200_OK
+        )
+
+    elif request.method == 'DELETE':
+        user.delete()
+        return Response({'status': 'deleted'}, status=status.HTTP_204_NO_CONTENT)
+
         
 @api_view(['POST'])
 @asesor_permission_required
@@ -3230,46 +3380,222 @@ def lista_usuarios(request):
         user.save()
         return Response([])
 
-
+PERMISO_CAJA_ID = 11  # <-- el ID que tú comentaste para Cajero
 @api_view(['POST'])
 def encargados_corresponsal(request):
+    """
+    Devuelve:
+      - sucursales: lista de terminales
+      - responsables: { terminal: "username-nombre-apellido" }
+      - users:       SOLO cajeros actuales (compatibilidad con vista vieja)
+      - users_options: idem anterior pero en [{value, text}]
+      - users_detailed: TODOS los usuarios, con flag tiene_caja
+    """
+
+    # 1) Sucursales (terminales)
     sucursales = models.Codigo_oficina.objects.values_list('terminal', flat=True).order_by('terminal')
-    
+
+    # 2) Responsables actuales por sucursal
     responsables_qs = models.Responsable_corresponsal.objects.select_related('user', 'sucursal').all()
-    
     responsables = {
         i.sucursal.terminal: f"{i.user.username}-{i.user.first_name}-{i.user.last_name}"
         for i in responsables_qs
     }
-    
-    # --- INICIO DE LA MODIFICACIÓN ---
-    # Filtramos usando tu sistema de permisos personalizado.
-    # 1. Filtramos por el ID del permiso (11 = 'caja')
-    # 2. Nos aseguramos de que 'tiene_permiso' sea True
-    # 3. Agregamos .distinct() para evitar duplicados si un usuario tiene el permiso varias veces.
-    users = User.objects.filter(
-        permisos_usuarios__permiso__id=11,
+
+    # 3) Usuarios que HOY tienen permiso de Cajero (id=11)
+    cajeros_qs = User.objects.filter(
+        permisos_usuarios__permiso__id=PERMISO_CAJA_ID,
         permisos_usuarios__tiene_permiso=True
-    ).values('username', 'first_name', 'last_name').distinct()
-    # --- FIN DE LA MODIFICACIÓN ---
-    
+    ).distinct()
+
     users_list = []
     users_options = []
-    for i in users:
-        user_string = f"{i['username']}-{i['first_name']}-{i['last_name']}"
+    for u in cajeros_qs:
+        user_string = f"{u.username}-{u.first_name}-{u.last_name}"
         users_list.append(user_string)
-        if i['username'] != 'sebasmoncada':
+
+        # Mantengo tu excepción de sebasmoncada
+        if u.username != 'sebasmoncada':
             users_options.append({'value': user_string, 'text': user_string})
+
+    # 4) TODOS los usuarios para la tabla (con tiene_caja = True/False)
+    #    Puedes afinar el filtro si quieres (ej: is_staff=False)
+    all_users_qs = User.objects.all().order_by('username')
+
+    users_detailed = []
+    for u in all_users_qs:
+        tiene_caja = models.Permisos_usuarios.objects.filter(
+            user=u,
+            permiso__id=PERMISO_CAJA_ID,
+            tiene_permiso=True
+        ).exists()
+
+        users_detailed.append({
+            'id': u.id,
+            'username': u.username,
+            'first_name': u.first_name,
+            'last_name': u.last_name,
+            'is_active': u.is_active,
+            'tiene_caja': tiene_caja,
+        })
 
     data = {
         'sucursales': list(sucursales),
-        'users': users_list,
-        'users_options': users_options, 
         'responsables': responsables,
+        'users': users_list,              # SOLO cajeros (como antes)
+        'users_options': users_options,   # SOLO cajeros (como antes)
+        'users_detailed': users_detailed  # 🔥 TODOS los usuarios para la nueva vista
     }
-    return Response(data)
+    return Response(data, status=status.HTTP_200_OK)
 
 
+@api_view(['POST'])
+@admin_permission_required
+def usuario_activar(request):
+    """
+    Cambia el estado is_active de un usuario de Django.
+    URL: POST /api/v1.0/admin/usuarios/activar/
+    Body: { "username": "juan", "is_active": true }
+    """
+    username = request.data.get('username')
+    is_active_raw = request.data.get('is_active', None)
+
+    if not username or is_active_raw is None:
+        return Response(
+            {'error': 'Los campos "username" e "is_active" son requeridos.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    is_active = _parse_bool(is_active_raw)
+
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    user.is_active = is_active
+    user.save()
+
+    return Response(
+        {
+            'username': user.username,
+            'is_active': user.is_active,
+            'detail': 'Estado actualizado correctamente.'
+        },
+        status=status.HTTP_200_OK
+    )
+
+CAJERO_PERMISO_ID = 11  # 👈 el que me dijiste
+
+@api_view(['POST'])
+@admin_permission_required
+def usuario_toggle_caja(request):
+    """
+    Activa o desactiva el permiso 'Cajero' (id=11) para un usuario.
+    URL: POST /api/v1.0/admin/cajeros/rol-caja/
+    Body: { "username": "juan", "tiene_caja": true }
+    """
+    username = request.data.get('username')
+    tiene_caja_raw = request.data.get('tiene_caja', None)
+
+    if not username or tiene_caja_raw is None:
+        return Response(
+            {'error': 'Los campos "username" y "tiene_caja" son requeridos.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    tiene_caja = _parse_bool(tiene_caja_raw)
+
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    try:
+        permiso_caja = Permisos.objects.get(id=CAJERO_PERMISO_ID)
+    except Permisos.DoesNotExist:
+        return Response(
+            {'error': f'No existe un permiso con id={CAJERO_PERMISO_ID} para "Cajero".'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Creamos o actualizamos el registro en Permisos_usuarios
+    Permisos_usuarios.objects.update_or_create(
+        user=user,
+        permiso=permiso_caja,
+        defaults={'tiene_permiso': tiene_caja}
+    )
+
+    return Response(
+        {
+            'username': user.username,
+            'tiene_caja': tiene_caja,
+            'detail': 'Rol cajero actualizado correctamente.'
+        },
+        status=status.HTTP_200_OK
+    )
+    
+@api_view(['PUT', 'DELETE'])
+@admin_permission_required
+def usuario_update_delete(request, username):
+    """
+    PUT: Actualiza datos básicos del usuario (username, first_name, last_name, email opcional).
+    DELETE: Elimina el usuario.
+    
+    URL base: /api/v1.0/admin/usuarios/<username>/
+    """
+    try:
+        user = User.objects.get(username=username)
+    except User.DoesNotExist:
+        return Response(
+            {'error': f'El usuario "{username}" no existe.'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == 'DELETE':
+        # Si quieres proteger superusuarios, puedes agregar aquí una validación.
+        user.delete()
+        return Response(
+            {'detail': f'El usuario "{username}" fue eliminado correctamente.'},
+            status=status.HTTP_200_OK
+        )
+
+    # ----- PUT -----
+    new_username = request.data.get('username', user.username)
+    first_name = request.data.get('first_name', user.first_name)
+    last_name = request.data.get('last_name', user.last_name)
+    email = request.data.get('email', user.email)
+
+    # Si cambia el username, verificamos que no exista ya
+    if new_username != user.username and User.objects.filter(username=new_username).exists():
+        return Response(
+            {'error': f'Ya existe un usuario con username "{new_username}".'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    user.username = new_username
+    user.first_name = first_name
+    user.last_name = last_name
+    user.email = email
+    user.save()
+
+    return Response(
+        {
+            'username': user.username,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'email': user.email,
+            'is_active': user.is_active,
+            'detail': 'Usuario actualizado correctamente.'
+        },
+        status=status.HTTP_200_OK
+    )
 
 @api_view(['POST'])
 def resumen_corresponsal(request):
@@ -4028,9 +4354,10 @@ def excel_precios(request):
 
 @api_view(['POST'])
 def guardar_precios(request):
-    cabecera = request.data['cabecera']
-    items = request.data['items']
-    
+    cabecera = request.data.get('cabecera', [])
+    items = request.data.get('items', [])
+    iva_excepciones = request.data.get('iva_excepciones', [])  # NUEVO
+
     if not items:
         return Response({'error': 'No hay items para guardar.'}, status=400)
 
@@ -4055,7 +4382,7 @@ def guardar_precios(request):
         # Iteramos sobre todos los campos de la cabecera, excepto el del producto
         for nombre_campo, index in header_map.items():
             if nombre_campo == 'Equipo':
-                continue # Omitimos la columna del producto
+                continue  # Omitimos la columna del producto
 
             if index < len(precio_row):
                 valor_raw = precio_row[index]
@@ -4067,7 +4394,10 @@ def guardar_precios(request):
                         valor = decimal.Decimal(str(valor_raw).replace(',', ''))
                     except (decimal.InvalidOperation, ValueError):
                         # Si la conversión falla, mostramos un mensaje en la consola y saltamos este registro
-                        print(f"Omitiendo valor inválido '{valor_raw}' para el producto '{producto}' en el campo '{nombre_campo}'")
+                        print(
+                            f"Omitiendo valor inválido '{valor_raw}' "
+                            f"para el producto '{producto}' en el campo '{nombre_campo}'"
+                        )
                         continue
                         
                     lista_de_precios_para_crear.append(
@@ -4081,7 +4411,19 @@ def guardar_precios(request):
     
     if lista_de_precios_para_crear:
         models.Lista_precio.objects.bulk_create(lista_de_precios_para_crear)
-    
+
+    # ==== NUEVO: guardar excepciones de IVA para prepago ====
+    if isinstance(iva_excepciones, list):
+        # Limpiamos vacíos / None
+        iva_excepciones_limpias = [p for p in iva_excepciones if p]
+
+        # Para prepago, pisamos las excepciones anteriores
+        models.IvaExcepcion.objects.filter(tipo='prepago').delete()
+        models.IvaExcepcion.objects.bulk_create([
+            models.IvaExcepcion(producto=p, tipo='prepago')
+            for p in iva_excepciones_limpias
+        ])
+
     return Response({'data': 'Datos guardados exitosamente'})
 
 
@@ -4781,9 +5123,16 @@ def debug_precio_publico(request):
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
-        iva = 1095578
-        
-        translates = models.Traducciones.objects.filter(tipo='prepago').values('equipo', 'stok', 'iva', 'active', 'tipo')
+        iva = 1095578  # umbral
+
+        # ==== NUEVO: cargar excepciones de IVA para prepago ====
+        iva_excepciones = set(
+            models.IvaExcepcion.objects.filter(tipo='prepago').values_list('producto', flat=True)
+        )
+
+        translates = models.Traducciones.objects.filter(tipo='prepago').values(
+            'equipo', 'stok', 'iva', 'active', 'tipo'
+        )
         df_translates = pd.DataFrame(translates)
         
         black_list = models.Lista_negra.objects.all().values_list('equipo', flat=True)
@@ -4846,9 +5195,13 @@ def translate_prepago(requests):
             formula2 = ' '.join(ast.literal_eval(formula_publico_obj.formula)) if formula_publico_obj else ''
 
             for _, row in nuevo_df.iterrows():
+                # row['stok'] es el nombre final del producto
                 if row['stok'] in lista_produtos:
                     continue
                 lista_produtos.add(row['stok'])
+
+                # ==== NUEVO: saber si este producto es excepción de IVA ====
+                forzar_iva = row['stok'] in iva_excepciones
                 
                 temp_data = [row['stok']]
                 for precio in precios:
@@ -4869,7 +5222,16 @@ def translate_prepago(requests):
                         formula = formula.replace('descuento','Descuento')
                     
                     formula = formula.replace('precioPublico', formula2)
-                    variables2 = {**variables2, 'precioPublico': formula2, 'PrecioPublico': formula2, 'Sub': '', 'Premium': '', 'Fintech': '', 'Addi': '', 'Valle': ''}
+                    variables2 = {
+                        **variables2,
+                        'precioPublico': formula2,
+                        'PrecioPublico': formula2,
+                        'Sub': '',
+                        'Premium': '',
+                        'Fintech': '',
+                        'Addi': '',
+                        'Valle': ''
+                    }
 
                     for i in range(10):
                         for key, value in variables2.items():
@@ -4890,18 +5252,28 @@ def translate_prepago(requests):
                     except NameError:
                         resultado = 0 
 
-                    if 'Precio Fintech' in precio.nombre or 'Precio Addi' in precio.nombre or 'Precio Adelantos Valle' in precio.nombre:
+                    if (
+                        'Precio Fintech' in precio.nombre
+                        or 'Precio Addi' in precio.nombre
+                        or 'Precio Adelantos Valle' in precio.nombre
+                    ):
                         kit_comprobante = True
+                        # aquí mantengo tu lógica original, porque el umbral
+                        # mezcla resultado + 2380 y valor original
                         if resultado + 2380 >= iva and row['valor'] < iva:
                             kit = resultado - iva + 2380
                             resultado = iva - 2380
+
                     elif 'Precio premium' in precio.nombre:
                         kit_comprobante = True
-                        if row['valor'] >= iva:
+                        # ==== AQUÍ aplicamos el "precio >= iva" O excepción ====
+                        if row['valor'] >= iva or forzar_iva:
                            kit = resultado * 0.19
+
                     elif 'Precio sub' in precio.nombre:
                         kit_comprobante = True
-                        if row['valor'] >= iva:
+                        # ==== AQUÍ tambén ====
+                        if row['valor'] >= iva or forzar_iva:
                             kit = resultado * 0.19
                     
                     temp_data.append(resultado)
@@ -4912,6 +5284,7 @@ def translate_prepago(requests):
                 data_response.append(temp_data)
 
         return Response({'validate': validate, 'data': data_response, 'crediminuto': [], 'cabecera': cabecera})
+
 
 
 
