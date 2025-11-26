@@ -15,6 +15,8 @@ import string
 import tempfile
 import traceback
 import uuid
+import decimal
+
 from collections import defaultdict
 from datetime import datetime, date, timedelta, time
 from decimal import Decimal, InvalidOperation
@@ -106,6 +108,8 @@ from .permissions import admin_permission_required # Asegúrate de que esta impo
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
 from rest_framework.views import APIView
+
+
 
 class MisRolesView(APIView):
     """
