@@ -176,7 +176,7 @@ class AsesorSerializer(serializers.ModelSerializer):
         # Rutas:
         rutas = list(instance.rutas_comisiones.values_list('ruta', flat=True))
 
-        # 👇 Si no hay rutas en RutaAsignada, usamos la del Perfil (dato “viejo”)
+        # Si no hay rutas en RutaAsignada, usamos la del Perfil (dato “viejo”)
         if not rutas:
             try:
                 perfil = instance.perfil
@@ -190,18 +190,82 @@ class AsesorSerializer(serializers.ModelSerializer):
 
     # ---------- VALIDACIÓN ----------
     def validate(self, attrs):
-        rol = attrs.get('rol', ROL_ASESOR)
-        rutas = attrs.get('rutas_asignadas', [])
+        """
+        Regla:
+        - Si el rol final es asesor_comisiones:
+            - Solo puede tener 1 ruta
+            - Cada ruta solo puede tener 1 asesor activo.
+        """
 
-        if rol not in [ROL_ASESOR, ROL_SUPERVISOR]:
+        # --- Determinar rol final ---
+        instance = self.instance
+        rol_en_payload = attrs.get('rol')
+        rol_actual = self._get_rol_actual(instance) if instance else None
+        rol_final = rol_en_payload if rol_en_payload is not None else (rol_actual or ROL_ASESOR)
+
+        # --- Determinar rutas finales ---
+        rutas_en_payload = attrs.get('rutas_asignadas', None)
+
+        if rutas_en_payload is not None:
+            rutas_finales = rutas_en_payload
+        else:
+            # Si no mandan rutas en el payload, usamos lo que ya tiene el usuario
+            if instance:
+                rutas_finales = list(instance.rutas_comisiones.values_list('ruta', flat=True))
+                if not rutas_finales:
+                    # fallback al Perfil.ruta_asignada
+                    try:
+                        perfil = instance.perfil
+                        if perfil.ruta_asignada:
+                            rutas_finales = [perfil.ruta_asignada]
+                        else:
+                            rutas_finales = []
+                    except Perfil.DoesNotExist:
+                        rutas_finales = []
+            else:
+                rutas_finales = []
+
+        # --- Validaciones de rol ---
+        if rol_final not in [ROL_ASESOR, ROL_SUPERVISOR]:
             raise serializers.ValidationError({
                 'rol': 'Rol inválido. Debe ser asesor_comisiones o supervisor_comisiones.'
             })
 
-        if rol == ROL_ASESOR and rutas and len(rutas) > 1:
+        # Un asesor solo puede tener UNA ruta
+        if rol_final == ROL_ASESOR and rutas_finales and len(rutas_finales) > 1:
             raise serializers.ValidationError({
                 'rutas_asignadas': 'Un asesor solo puede tener una ruta asignada.'
             })
+
+        # --- VALIDACIÓN: una ruta solo puede tener 1 asesor ---
+        if rol_final == ROL_ASESOR and rutas_finales:
+            MAX_ASESORES_POR_RUTA = 1
+
+            for ruta in rutas_finales:
+                qs = RutaAsignada.objects.filter(
+                    ruta=ruta,
+                    user__is_active=True,  # solo contamos usuarios activos
+                    user__permisos_usuarios__permiso__permiso=ROL_ASESOR,
+                    user__permisos_usuarios__tiene_permiso=True,
+                    user__permisos_usuarios__permiso__active=True,
+                ).distinct()
+
+                # Si estamos editando, no contamos al mismo usuario
+                if instance:
+                    qs = qs.exclude(user=instance)
+
+                count = qs.count()
+
+                if count >= MAX_ASESORES_POR_RUTA:
+                    raise serializers.ValidationError({
+                        'rutas_asignadas': [
+                            f'La ruta "{ruta}" ya tiene un asesor asignado.'
+                        ]
+                    })
+
+        # Normalizamos en attrs lo que realmente se va a usar en create/update
+        attrs['rol'] = rol_final
+        attrs['rutas_asignadas'] = rutas_finales
 
         return attrs
 
@@ -281,6 +345,9 @@ class AsesorSerializer(serializers.ModelSerializer):
 
     # ---------- HELPERS ----------
     def _get_rol_actual(self, user):
+        if not user:
+            return None
+
         permisos_qs = Permisos_usuarios.objects.filter(
             user=user,
             tiene_permiso=True,
