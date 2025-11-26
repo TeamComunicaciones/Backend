@@ -1818,36 +1818,90 @@ def reporte_asesor_view(request):
 @asesor_permission_required(allow_supervisor=True)
 def filtros_reporte_view(request):
     """
-    Devuelve los filtros para el dashboard del asesor.
-    Automáticamente filtra por la ruta asignada al usuario.
+    Devuelve los filtros para el dashboard de comisiones.
+
+    - Asesor: solo ve los puntos de venta de su ruta_asignada (Perfil).
+    - Supervisor: solo ve los puntos de venta de las rutas que tiene en RutaAsignada,
+      agrupados por ruta para separar visualmente.
     """
-    try:
-        # 1. Obtener la ruta asignada al usuario logueado desde su perfil
-        ruta_asesor = request.user.perfil.ruta_asignada
-        
-        # 2. Si el asesor no tiene una ruta asignada en su perfil, no puede ver el dashboard.
-        if not ruta_asesor:
+    user = request.user
+
+    # 🔹 1. Caso SUPERVISOR de comisiones
+    if models.user_es_supervisor_comisiones(user):
+        # Rutas asignadas al supervisor (tabla RutaAsignada)
+        rutas = list(
+            models.RutaAsignada.objects
+            .filter(user=user)
+            .values_list('ruta', flat=True)
+        )
+
+        if not rutas:
             return Response(
-                {"error": "No tienes una ruta asignada para ver este reporte."}, 
+                {"error": "No tienes rutas asignadas como supervisor de comisiones."},
                 status=status.HTTP_403_FORBIDDEN
             )
-            
-        # 3. Obtener los puntos de venta ÚNICAMENTE de esa ruta
-        puntos_de_venta = models.Comision.objects.filter(ruta=ruta_asesor).values(
-            'idpos', 'punto_de_venta'
-        ).distinct().order_by('punto_de_venta')
 
-        # 4. Devolver un objeto que solo contiene los puntos de venta.
+        # Puntos de venta SOLO de esas rutas
+        qs = (
+            models.Comision.objects
+            .filter(ruta__in=rutas)
+            .values('ruta', 'idpos', 'punto_de_venta')
+            .distinct()
+            .order_by('ruta', 'punto_de_venta')
+        )
+
+        # Agrupar PV por ruta para que el frontend pueda mostrar la separación
+        rutas_dict = {}
+        for row in qs:
+            ruta = row['ruta'] or 'SIN_RUTA'
+            if ruta not in rutas_dict:
+                rutas_dict[ruta] = {
+                    "ruta": ruta,
+                    "puntos_de_venta": []
+                }
+            rutas_dict[ruta]["puntos_de_venta"].append({
+                "idpos": row['idpos'],
+                "punto_de_venta": row['punto_de_venta'],
+            })
+
         data = {
-            'puntos_de_venta': list(puntos_de_venta)
+            "tipo_usuario": "supervisor",
+            "rutas": list(rutas_dict.values())
         }
         return Response(data)
 
+    # 🔹 2. Caso ASESOR de comisiones
+    try:
+        perfil = user.perfil
     except models.Perfil.DoesNotExist:
-         return Response(
-            {"error": "Tu usuario no tiene un perfil de permisos configurado."}, 
+        return Response(
+            {"error": "Tu usuario no tiene un perfil de permisos configurado."},
             status=status.HTTP_403_FORBIDDEN
-         )
+        )
+
+    ruta_asesor = perfil.ruta_asignada
+
+    # Si el asesor no tiene una ruta asignada en su perfil, no puede ver el dashboard.
+    if not ruta_asesor:
+        return Response(
+            {"error": "No tienes una ruta asignada para ver este reporte."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    puntos_de_venta = (
+        models.Comision.objects
+        .filter(ruta=ruta_asesor)
+        .values('idpos', 'punto_de_venta')
+        .distinct()
+        .order_by('punto_de_venta')
+    )
+
+    data = {
+        "tipo_usuario": "asesor",
+        "ruta": ruta_asesor,
+        "puntos_de_venta": list(puntos_de_venta)
+    }
+    return Response(data)
 
 @api_view(['GET'])
 @asesor_permission_required
