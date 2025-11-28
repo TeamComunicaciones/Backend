@@ -1096,202 +1096,202 @@ def consulta_agrupada_pdv_view(request):
     return Response(data)
 
 
-@api_view(['POST'])
-@asesor_permission_required
-def pagar_comisiones_view(request):
-    """
-    Procesa el pago de comisiones desde el dashboard del asesor.
+# @api_view(['POST'])
+# @asesor_permission_required
+# def pagar_comisiones_view(request):
+#     """
+#     Procesa el pago de comisiones desde el dashboard del asesor.
 
-    Body:
-    {
-        "comision_ids": [1,2,3],
-        "metodos_pago": {
-            "Nequi": 10000,
-            "Recarga": 5000,
-            "Acumulado": 2000
-        },
-        "soporte": "nombre_archivo_en_sharepoint.ext"  # OPCIONAL
-    }
+#     Body:
+#     {
+#         "comision_ids": [1,2,3],
+#         "metodos_pago": {
+#             "Nequi": 10000,
+#             "Recarga": 5000,
+#             "Acumulado": 2000
+#         },
+#         "soporte": "nombre_archivo_en_sharepoint.ext"  # OPCIONAL
+#     }
 
-    Reglas:
-      - Solo comisiones en estado Pendiente o Acumulada.
-      - agrupa por mismo idpos.
-      - Crea un PagoComision.
-      - CREA registros 'fantasma' (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO),
-        pero NUNCA con valores negativos.
-      - Reversible con admin_pago_detail (DELETE).
-    """
-    comision_ids = request.data.get('comision_ids', [])
-    metodos_pago_original = request.data.get('metodos_pago', {})
+#     Reglas:
+#       - Solo comisiones en estado Pendiente o Acumulada.
+#       - agrupa por mismo idpos.
+#       - Crea un PagoComision.
+#       - CREA registros 'fantasma' (PAGO REGISTRADO, SALDO PENDIENTE, AJUSTE, USO DE SALDO),
+#         pero NUNCA con valores negativos.
+#       - Reversible con admin_pago_detail (DELETE).
+#     """
+#     comision_ids = request.data.get('comision_ids', [])
+#     metodos_pago_original = request.data.get('metodos_pago', {})
 
-    # soporte opcional (nombre de archivo en SharePoint)
-    soporte = request.data.get('soporte')
+#     # soporte opcional (nombre de archivo en SharePoint)
+#     soporte = request.data.get('soporte')
 
-    if not comision_ids or not metodos_pago_original:
-        return Response(
-            {"error": "Faltan datos para procesar el pago."},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+#     if not comision_ids or not metodos_pago_original:
+#         return Response(
+#             {"error": "Faltan datos para procesar el pago."},
+#             status=status.HTTP_400_BAD_REQUEST
+#         )
 
-    with transaction.atomic():
-        comisiones_a_pagar = (
-            models.Comision.objects
-            .filter(pk__in=comision_ids, estado__in=['Pendiente', 'Acumulada'])
-            .select_for_update()
-        )
+#     with transaction.atomic():
+#         comisiones_a_pagar = (
+#             models.Comision.objects
+#             .filter(pk__in=comision_ids, estado__in=['Pendiente', 'Acumulada'])
+#             .select_for_update()
+#         )
         
-        if not comisiones_a_pagar.exists():
-            return Response(
-                {"error": "No se encontraron comisiones válidas para pagar."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+#         if not comisiones_a_pagar.exists():
+#             return Response(
+#                 {"error": "No se encontraron comisiones válidas para pagar."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
 
-        idpos_unicos = comisiones_a_pagar.values_list('idpos', flat=True).distinct()
-        if idpos_unicos.count() > 1:
-            return Response(
-                {"error": "No se pueden pagar comisiones de diferentes Puntos de Venta a la vez."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+#         idpos_unicos = comisiones_a_pagar.values_list('idpos', flat=True).distinct()
+#         if idpos_unicos.count() > 1:
+#             return Response(
+#                 {"error": "No se pueden pagar comisiones de diferentes Puntos de Venta a la vez."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
         
-        primera_comision = comisiones_a_pagar.first()
+#         primera_comision = comisiones_a_pagar.first()
 
-        # Total de comisiones a pagar
-        monto_comisiones = decimal_or_zero(
-            comisiones_a_pagar.aggregate(total=Sum('comision_final'))['total']
-        )
+#         # Total de comisiones a pagar
+#         monto_comisiones = decimal_or_zero(
+#             comisiones_a_pagar.aggregate(total=Sum('comision_final'))['total']
+#         )
 
-        # Normalizar metodos_pago a Decimals y separar Acumulado
-        monto_acumulado_usado = decimal_or_zero(
-            metodos_pago_original.get('Acumulado', 0)
-        )
+#         # Normalizar metodos_pago a Decimals y separar Acumulado
+#         monto_acumulado_usado = decimal_or_zero(
+#             metodos_pago_original.get('Acumulado', 0)
+#         )
 
-        monto_real_pagado = Decimal('0')
-        metodos_pago_normalizados = {}
+#         monto_real_pagado = Decimal('0')
+#         metodos_pago_normalizados = {}
 
-        for metodo, valor in metodos_pago_original.items():
-            valor_dec = decimal_or_zero(valor)
-            if valor_dec <= 0:
-                continue
-            metodos_pago_normalizados[metodo] = float(valor_dec)
-            if metodo != 'Acumulado':
-                monto_real_pagado += valor_dec
+#         for metodo, valor in metodos_pago_original.items():
+#             valor_dec = decimal_or_zero(valor)
+#             if valor_dec <= 0:
+#                 continue
+#             metodos_pago_normalizados[metodo] = float(valor_dec)
+#             if metodo != 'Acumulado':
+#                 monto_real_pagado += valor_dec
 
-        total_metodos = monto_real_pagado + monto_acumulado_usado
+#         total_metodos = monto_real_pagado + monto_acumulado_usado
 
-        if monto_comisiones <= 0:
-            return Response(
-                {"error": "El total de comisiones es cero o negativo."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+#         if monto_comisiones <= 0:
+#             return Response(
+#                 {"error": "El total de comisiones es cero o negativo."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
 
-        if total_metodos <= 0:
-            return Response(
-                {"error": "El total ingresado en los métodos de pago debe ser mayor a cero."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+#         if total_metodos <= 0:
+#             return Response(
+#                 {"error": "El total ingresado en los métodos de pago debe ser mayor a cero."},
+#                 status=status.HTTP_400_BAD_REQUEST
+#             )
 
-        # 🔹 Meses de referencia para los registros fantasma
+#         # 🔹 Meses de referencia para los registros fantasma
 
-        # Mes "visual" para el dashboard (Mes Pago que ves en el filtro/front)
-        mes_pago_ref = (
-            primera_comision.mes_pago
-            or primera_comision.mes_liquidacion
-            or timezone.now().date().replace(day=1)
-        )
+#         # Mes "visual" para el dashboard (Mes Pago que ves en el filtro/front)
+#         mes_pago_ref = (
+#             primera_comision.mes_pago
+#             or primera_comision.mes_liquidacion
+#             or timezone.now().date().replace(day=1)
+#         )
 
-        # Mes histórico de liquidación / origen
-        mes_liq_ref = (
-            primera_comision.mes_liquidacion
-            or primera_comision.mes_pago
-            or timezone.now().date().replace(day=1)
-        )
+#         # Mes histórico de liquidación / origen
+#         mes_liq_ref = (
+#             primera_comision.mes_liquidacion
+#             or primera_comision.mes_pago
+#             or timezone.now().date().replace(day=1)
+#         )
 
-        # Creamos el PagoComision (guarda también el comprobante si viene)
-        pago = models.PagoComision.objects.create(
-            idpos=primera_comision.idpos,
-            punto_de_venta=primera_comision.punto_de_venta,
-            creado_por=request.user,
-            monto_total_pagado=total_metodos,
-            monto_comisiones=monto_comisiones,
-            metodos_pago=metodos_pago_normalizados,
-            comprobante_url=soporte or None,
-        )
+#         # Creamos el PagoComision (guarda también el comprobante si viene)
+#         pago = models.PagoComision.objects.create(
+#             idpos=primera_comision.idpos,
+#             punto_de_venta=primera_comision.punto_de_venta,
+#             creado_por=request.user,
+#             monto_total_pagado=total_metodos,
+#             monto_comisiones=monto_comisiones,
+#             metodos_pago=metodos_pago_normalizados,
+#             comprobante_url=soporte or None,
+#         )
 
-        # 1. Consolidar las comisiones originales que se están pagando
-        comisiones_a_pagar.update(estado='Consolidada', pagos=pago)
+#         # 1. Consolidar las comisiones originales que se están pagando
+#         comisiones_a_pagar.update(estado='Consolidada', pagos=pago)
 
-        # 2. Si se usó saldo acumulado, crear un registro para reflejarlo
-        if monto_acumulado_usado > 0:
-            models.Comision.objects.create(
-                idpos=primera_comision.idpos,
-                punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor,
-                asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta,
-                mes_pago=mes_pago_ref,          # 👈 Mes pago visible (ej. noviembre)
-                mes_liquidacion=mes_liq_ref,    # 👈 Mes origen/histórico (ej. agosto)
-                comision_final=monto_acumulado_usado,  # siempre positivo
-                estado='Acumulada',
-                producto=f"USO DE SALDO EN PAGO #{pago.id}",
-                iccid=f"ACUM-{pago.id}",
-                pagos=pago,
-            )
+#         # 2. Si se usó saldo acumulado, crear un registro para reflejarlo
+#         if monto_acumulado_usado > 0:
+#             models.Comision.objects.create(
+#                 idpos=primera_comision.idpos,
+#                 punto_de_venta=primera_comision.punto_de_venta,
+#                 asesor=primera_comision.asesor,
+#                 asesor_identificador=primera_comision.asesor_identificador,
+#                 ruta=primera_comision.ruta,
+#                 mes_pago=mes_pago_ref,          # 👈 Mes pago visible (ej. noviembre)
+#                 mes_liquidacion=mes_liq_ref,    # 👈 Mes origen/histórico (ej. agosto)
+#                 comision_final=monto_acumulado_usado,  # siempre positivo
+#                 estado='Acumulada',
+#                 producto=f"USO DE SALDO EN PAGO #{pago.id}",
+#                 iccid=f"ACUM-{pago.id}",
+#                 pagos=pago,
+#             )
 
-        # 3. Si se hizo un pago real (efectivo, etc.), crear la comisión 'Pagada'
-        if monto_real_pagado > 0:
-            models.Comision.objects.create(
-                idpos=primera_comision.idpos,
-                punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor,
-                asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta,
-                mes_pago=mes_pago_ref,
-                mes_liquidacion=mes_liq_ref,
-                comision_final=monto_real_pagado,  # positivo
-                estado='Pagada',
-                producto=f"PAGO REGISTRADO #{pago.id}",
-                iccid=f"PAGO-{pago.id}",
-                pagos=pago,
-            )
+#         # 3. Si se hizo un pago real (efectivo, etc.), crear la comisión 'Pagada'
+#         if monto_real_pagado > 0:
+#             models.Comision.objects.create(
+#                 idpos=primera_comision.idpos,
+#                 punto_de_venta=primera_comision.punto_de_venta,
+#                 asesor=primera_comision.asesor,
+#                 asesor_identificador=primera_comision.asesor_identificador,
+#                 ruta=primera_comision.ruta,
+#                 mes_pago=mes_pago_ref,
+#                 mes_liquidacion=mes_liq_ref,
+#                 comision_final=monto_real_pagado,  # positivo
+#                 estado='Pagada',
+#                 producto=f"PAGO REGISTRADO #{pago.id}",
+#                 iccid=f"PAGO-{pago.id}",
+#                 pagos=pago,
+#             )
         
-        # 4. Calcular el balance final y crear comisión de saldo si es necesario
-        restante = monto_comisiones - total_metodos
+#         # 4. Calcular el balance final y crear comisión de saldo si es necesario
+#         restante = monto_comisiones - total_metodos
 
-        if restante > 0:
-            # Saldo faltante -> PENDIENTE positiva
-            models.Comision.objects.create(
-                idpos=primera_comision.idpos,
-                punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor,
-                asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta,
-                mes_pago=mes_pago_ref,
-                mes_liquidacion=mes_liq_ref,
-                comision_final=restante,  # positivo
-                estado='Pendiente',
-                producto=f"SALDO PENDIENTE PAGO #{pago.id}",
-                iccid=f"SALDO-{pago.id}",
-                pagos=pago,
-            )
-        elif restante < 0:
-            # Hubo un sobrepago -> ACUMULADA (crédito a favor) POSITIVA
-            sobrante = abs(restante)
-            models.Comision.objects.create(
-                idpos=primera_comision.idpos,
-                punto_de_venta=primera_comision.punto_de_venta,
-                asesor=primera_comision.asesor,
-                asesor_identificador=primera_comision.asesor_identificador,
-                ruta=primera_comision.ruta,
-                mes_pago=mes_pago_ref,
-                mes_liquidacion=mes_liq_ref,
-                comision_final=sobrante,  # positivo
-                estado='Acumulada',
-                producto=f"AJUSTE POR SOBRANTE PAGO #{pago.id}",
-                iccid=f"AJUSTE-{pago.id}",
-                pagos=pago,
-            )
+#         if restante > 0:
+#             # Saldo faltante -> PENDIENTE positiva
+#             models.Comision.objects.create(
+#                 idpos=primera_comision.idpos,
+#                 punto_de_venta=primera_comision.punto_de_venta,
+#                 asesor=primera_comision.asesor,
+#                 asesor_identificador=primera_comision.asesor_identificador,
+#                 ruta=primera_comision.ruta,
+#                 mes_pago=mes_pago_ref,
+#                 mes_liquidacion=mes_liq_ref,
+#                 comision_final=restante,  # positivo
+#                 estado='Pendiente',
+#                 producto=f"SALDO PENDIENTE PAGO #{pago.id}",
+#                 iccid=f"SALDO-{pago.id}",
+#                 pagos=pago,
+#             )
+#         elif restante < 0:
+#             # Hubo un sobrepago -> ACUMULADA (crédito a favor) POSITIVA
+#             sobrante = abs(restante)
+#             models.Comision.objects.create(
+#                 idpos=primera_comision.idpos,
+#                 punto_de_venta=primera_comision.punto_de_venta,
+#                 asesor=primera_comision.asesor,
+#                 asesor_identificador=primera_comision.asesor_identificador,
+#                 ruta=primera_comision.ruta,
+#                 mes_pago=mes_pago_ref,
+#                 mes_liquidacion=mes_liq_ref,
+#                 comision_final=sobrante,  # positivo
+#                 estado='Acumulada',
+#                 producto=f"AJUSTE POR SOBRANTE PAGO #{pago.id}",
+#                 iccid=f"AJUSTE-{pago.id}",
+#                 pagos=pago,
+#             )
             
-    return Response({"mensaje": "Pago procesado con éxito."}, status=status.HTTP_200_OK)
+#     return Response({"mensaje": "Pago procesado con éxito."}, status=status.HTTP_200_OK)
 
 @api_view(['GET'])
 # @permission_classes([IsAuthenticated]) # Descomenta para proteger la vista
