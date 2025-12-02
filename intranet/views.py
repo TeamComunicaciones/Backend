@@ -16,6 +16,7 @@ import tempfile
 import traceback
 import uuid
 import decimal
+import unicodedata
 
 from collections import defaultdict
 from datetime import datetime, date, timedelta, time
@@ -1121,7 +1122,7 @@ def pagar_comisiones_view(request):
         pero NUNCA con valores negativos.
       - Reversible con admin_pago_detail (DELETE).
     """
-    comision_ids = request.data.get('comision_ids', [])
+    comision_ids = request.data.get('comision_ids', []) 
     metodos_pago_original = request.data.get('metodos_pago', {})
 
     # soporte opcional (nombre de archivo en SharePoint)
@@ -3130,29 +3131,45 @@ def get_image_corresponsal(request):
     if response.status_code == 200:
         access_token = response.json().get('access_token')
     else:
-        raise AuthenticationFailed(f"Error getting access token")
+        raise AuthenticationFailed("Error getting access token")
     
-    file_name = request.data['url']
+    # Lo que viene desde el front: exactamente lo que guardaste en BD
+    # Puede ser:
+    #   - "archivo.jpg"                                   (registros viejos)
+    #   - "2025/diciembre/archivo.jpg"
+    #   - "2025/diciembre/bancodebogota/archivo.jpg"
+    relative_path = request.data['url']
 
     headers = {
         'Authorization': f'Bearer {access_token}',
-        'Accept': 'application/json'
+        'Accept': '*/*',
     }
-    site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-    download_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
 
-    # Descargar la imagen desde SharePoint
+    site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+
+    # Siempre colgamos de /uploads/
+    # Resultado:
+    #  - "uploads/archivo.jpg"
+    #  - "uploads/2025/diciembre/archivo.jpg"
+    #  - "uploads/2025/diciembre/bancodebogota/archivo.jpg"
+    download_path = f"uploads/{relative_path}"
+    download_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{download_path}:/content'
+
     response = requests.get(download_url, headers=headers)
 
     if response.status_code == 200:
-        # Devolver la imagen al frontend
         encoded_image = base64.b64encode(response.content).decode('utf-8')
-        return JsonResponse({'image': encoded_image, 'content_type': response.headers['Content-Type']})
+        return JsonResponse({
+            'image': encoded_image,
+            'content_type': response.headers.get('Content-Type', 'image/jpeg')
+        })
     else:
-        return JsonResponse({'error': response.json()}, status=400)
+        try:
+            error_json = response.json()
+        except ValueError:
+            error_json = {'message': response.text}
+        return JsonResponse({'error': error_json}, status=400)
 
-
-    pass
 
 @api_view(['POST'])
 @cajero_permission_required # <-- Se protege la vista
@@ -3288,6 +3305,105 @@ def generate_unique_filename(original_name):
 
 
 
+MESES_ES = {
+    1: 'enero',
+    2: 'febrero',
+    3: 'marzo',
+    4: 'abril',
+    5: 'mayo',
+    6: 'junio',
+    7: 'julio',
+    8: 'agosto',
+    9: 'septiembre',
+    10: 'octubre',
+    11: 'noviembre',
+    12: 'diciembre',
+}
+
+
+def slugify_for_path(texto: str) -> str:
+    """
+    Convierte un texto en algo seguro para usar como nombre de carpeta:
+    - sin acentos
+    - solo letras y números
+    - sin espacios
+    Ej: 'Corresponsal Banco de Bogota' -> 'corresponsalbancodebogota'
+    """
+    if not texto:
+        return ''
+    texto_norm = unicodedata.normalize('NFKD', texto)
+    texto_norm = texto_norm.encode('ascii', 'ignore').decode('ascii')
+    texto_norm = re.sub(r'[^a-zA-Z0-9]+', '', texto_norm)
+    return texto_norm.lower()
+
+
+def ensure_folder(access_token: str, site_id: str, parent_path: str, folder_name: str) -> str:
+    """
+    Crea la carpeta 'folder_name' dentro de 'parent_path' si no existe.
+    parent_path:
+      - None o ''  -> raíz del drive
+      - 'uploads'  -> subcarpeta en raíz
+      - 'uploads/2025' -> subcarpeta dentro de 'uploads', etc.
+    Devuelve la ruta completa de la carpeta (p.ej. 'uploads/2025/diciembre').
+    """
+    if not folder_name:
+        return parent_path or ""
+
+    parent_path = parent_path or ""
+
+    if parent_path:
+        # Ej: /drive/root:/uploads/2025:/children
+        url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{parent_path}:/children'
+    else:
+        # Carpeta directamente bajo la raíz del drive
+        url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root/children'
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+    }
+    data = {
+        "name": folder_name,
+        "folder": {},
+        "@microsoft.graph.conflictBehavior": "fail"  # 409 si ya existe
+    }
+
+    resp = requests.post(url, headers=headers, json=data, timeout=30)
+
+    # 201/200 -> creada ok
+    if resp.status_code in (200, 201):
+        return f"{parent_path}/{folder_name}" if parent_path else folder_name
+
+    # 409 -> conflicto porque ya existe: la damos por buena
+    if resp.status_code == 409:
+        return f"{parent_path}/{folder_name}" if parent_path else folder_name
+
+    # Otros errores sí nos interesan
+    resp.raise_for_status()
+    return f"{parent_path}/{folder_name}" if parent_path else folder_name
+
+
+def ensure_folder_chain(access_token: str, site_id: str, base_folder: str, chain: list[str]) -> str:
+    """
+    Asegura la existencia de:
+      base_folder
+      base_folder/chain[0]
+      base_folder/chain[0]/chain[1]
+      ...
+    y devuelve la ruta final completa (p.ej. 'uploads/2025/diciembre/bancodebogota').
+    """
+    # Primero asegurar la base en raíz: 'uploads'
+    current_path = ensure_folder(access_token, site_id, None, base_folder)
+
+    # Luego cada subcarpeta en la cadena
+    for folder in chain:
+        if not folder:
+            continue
+        current_path = ensure_folder(access_token, site_id, current_path, folder)
+
+    return current_path
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 @cajero_permission_required
@@ -3296,6 +3412,7 @@ def consignacion_corresponsal(request):
     Registra una consignación de corresponsal:
       - Sube la imagen a SharePoint mediante Microsoft Graph.
       - Persiste la transacción en la BD.
+      - Crea automáticamente carpetas por año / mes / banco.
     """
     try:
         usuario = request.user
@@ -3320,10 +3437,11 @@ def consignacion_corresponsal(request):
                 status=400
             )
 
-        # Parseo de fechas con la importación correcta (from datetime import datetime)
+        # Parseo de fechas
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-        # --- Lógica de SharePoint (Microsoft Graph) ---
+        # --- Lógica de autenticación Microsoft Graph ---
+        # (IDEAL: mover estos valores a settings / variables de entorno)
         tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
         client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
         client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
@@ -3344,24 +3462,53 @@ def consignacion_corresponsal(request):
         if not access_token:
             return Response({'detail': 'No se pudo obtener el access_token de Microsoft Graph.'}, status=503)
 
+        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+
+        # ---------------------------
+        # ARMAR RUTA DINÁMICA EN SHAREPOINT
+        # ---------------------------
+        banco_categoria = consignacion_data.get('banco')  # Detalle de origen
+        anio_str = str(fecha_reporte.year)                # '2025'
+        mes_str = MESES_ES[fecha_reporte.month]           # 'diciembre'
+        banco_slug = slugify_for_path(banco_categoria)    # 'bancodebogota', etc.
+
+        # Cadena de carpetas debajo de 'uploads'
+        # Ej: ['2025', 'diciembre', 'bancodebogota']
+        chain = [anio_str, mes_str]
+        if banco_slug:
+            chain.append(banco_slug)
+
+        # Asegurar que exista uploads/2025/diciembre[/bancodebogota]
+        full_upload_folder = ensure_folder_chain(
+            access_token=access_token,
+            site_id=site_id,
+            base_folder="uploads",
+            chain=chain
+        )
+        # full_upload_folder -> 'uploads/2025/diciembre' o 'uploads/2025/diciembre/bancodebogota'
+
+        # Nombre único de archivo
+        file_name = generate_unique_filename(image.name)
+
+        # Ruta relativa que se guarda en BD (SIN 'uploads/')
+        # '2025/diciembre/bancodebogota/archivo.jpg'
+        relative_folder = "/".join(chain)        # '2025/diciembre/bancodebogota' o '2025/diciembre'
+        relative_path = f"{relative_folder}/{file_name}"
+
+        # Ruta completa en el drive para la subida (CON 'uploads/')
+        upload_path = f"{full_upload_folder}/{file_name}"
+        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{upload_path}:/content'
+
         headers_sp = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/octet-stream'
         }
 
-        site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
-
-        # Genera un nombre único para el archivo
-        file_name = generate_unique_filename(image.name)
-
-        # Sube el archivo (imagen) a la carpeta /uploads/ del drive raíz del sitio
-        upload_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/uploads/{file_name}:/content'
+        # Subir archivo a SharePoint
         response_upload = requests.put(upload_url, headers=headers_sp, data=image.read(), timeout=120)
         response_upload.raise_for_status()
 
         # --- Lógica de guardado en la BD ---
-        banco_categoria = consignacion_data.get('banco')
-
         # Estado por categoría
         estado = 'saldado' if banco_categoria in ['Corresponsal Banco de Bogota', 'Reclamaciones'] else 'pendiente'
 
@@ -3385,7 +3532,7 @@ def consignacion_corresponsal(request):
             responsable=usuario.id,
             estado=estado,
             detalle=consignacion_data.get('detalle'),
-            url=file_name,  # Guardamos el nombre/ubicación del archivo subido
+            url=relative_path,  # Guardamos la ruta relativa: '2025/diciembre/bancodebogota/archivo.jpg'
             codigo_incocredito=sucursal,
             detalle_banco=detalle_banco_valor,
             # Campos específicos solo para "Venta doble proposito"
@@ -3406,7 +3553,81 @@ def consignacion_corresponsal(request):
         return Response({'detail': f'Error interno del servidor: {str(e)}'}, status=500)
 
 
+# ==========================
+#  Vista: get_image_corresponsal
+# ==========================
 
+@api_view(['POST'])
+def get_image_corresponsal(request):
+    """
+    Descarga la imagen desde SharePoint a partir de la ruta guardada en BD.
+    El front envía:
+      { "url": "2025/diciembre/bancodebogota/archivo.jpg" }
+    Para consignaciones viejas puede ser solo:
+      { "url": "archivo.jpg" }
+    """
+    # --- Token Microsoft Graph ---
+    tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
+    client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
+    client_secret = 'vPc8Q~gCQUBkwdUQ6Ez1FMRiAmpFnuuWsR4wIdt1'
+
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
+    }
+
+    data2 = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'scope': 'https://graph.microsoft.com/.default'
+    }
+
+    response = requests.post(url, headers=headers, data=data2)
+
+    if response.status_code == 200:
+        access_token = response.json().get('access_token')
+    else:
+        raise AuthenticationFailed("Error getting access token")
+
+    # Lo que viene desde el front: exactamente lo que guardaste en BD
+    # Puede ser:
+    #   - "archivo.jpg" (registros viejos)
+    #   - "2025/diciembre/archivo.jpg"
+    #   - "2025/diciembre/bancodebogota/archivo.jpg"
+    relative_path = request.data.get('url')
+    if not relative_path:
+        return JsonResponse({'error': 'No se recibió la url de la imagen.'}, status=400)
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Accept': '*/*'
+    }
+
+    site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
+
+    # Siempre colgamos de /uploads/
+    # Resultado:
+    #  - "uploads/archivo.jpg"
+    #  - "uploads/2025/diciembre/archivo.jpg"
+    #  - "uploads/2025/diciembre/bancodebogota/archivo.jpg"
+    download_path = f"uploads/{relative_path}"
+    download_url = f'https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{download_path}:/content'
+
+    response = requests.get(download_url, headers=headers)
+
+    if response.status_code == 200:
+        encoded_image = base64.b64encode(response.content).decode('utf-8')
+        return JsonResponse({
+            'image': encoded_image,
+            'content_type': response.headers.get('Content-Type', 'image/jpeg')
+        })
+    else:
+        try:
+            error_json = response.json()
+        except ValueError:
+            error_json = {'message': response.text}
+        return JsonResponse({'error': error_json}, status=400)
 
 
 @api_view(['GET', 'POST', 'PUT'])
