@@ -271,8 +271,6 @@ class Comision(models.Model):
     pago = models.CharField(max_length=100, blank=True, null=True)
     pagos = models.ForeignKey(PagoComision, on_delete=models.SET_NULL, null=True, blank=True, related_name='comisiones_pagadas')
 
-    
-    # --- CAMBIOS CLAVE ---
     mes_liquidacion = models.DateField(null=True, blank=True)
     mes_pago = models.DateField(null=True, blank=True)
 
@@ -286,9 +284,11 @@ class Comision(models.Model):
     estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Pendiente', db_index=True)
     fecha_carga = models.DateTimeField(auto_now_add=True)
 
+    # 🔴 NUEVO:
+    observacion = models.TextField(blank=True, null=True)
+
     def __str__(self):
         return f"Comisión para {self.asesor_identificador} - ICCID: {self.iccid}"
-    
 
     class Meta:
         verbose_name = "Comisión"

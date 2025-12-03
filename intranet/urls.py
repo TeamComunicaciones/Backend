@@ -1,17 +1,18 @@
 from django.urls import path, include
 from rest_framework import routers
-from . import viewsets
+from . import viewsets   # Si no lo usas, luego lo puedes borrar
 from . import views
 from .views import actas_entrega
 from .views import CustomTokenObtainPairView
 from rest_framework_simplejwt.views import TokenRefreshView
 
 router = routers.SimpleRouter()
-
-
+# Nota: aquí NO registramos comisiones-pendientes en el router,
+# porque las estamos manejando con vistas basadas en función.
 
 urlpatterns = [
     path('', include(router.urls)),
+
     path('shopify-return', views.shopify_return),
     path('shopify', views.shopify_token),
     path('login', views.login),
@@ -20,10 +21,16 @@ urlpatterns = [
     path('permissions-matrix', views.permissions_matrix),
     path('permissions-edit', views.permissions_edit),
     path('create-user', views.login),
+
     path('translate-products-prepago', views.translate_products_prepago),
     path('translate-prepago', views.translate_prepago),
     path('lista-productos-prepago', views.lista_productos_prepago),
-    path('lista-productos-prepago-equipo/', views.ListaProductosPrepagoEquipo.as_view(), name='lista_productos_prepago_equipo'),
+    path(
+        'lista-productos-prepago-equipo/',
+        views.ListaProductosPrepagoEquipo.as_view(),
+        name='lista_productos_prepago_equipo'
+    ),
+
     path('planes', views.planes),
     path('productos', views.productos),
     path('tienda', views.tienda),
@@ -31,20 +38,24 @@ urlpatterns = [
     path('deleteImagen', views.deleteImagen),
     path('informes', views.informes),
     path('contactanos', views.contactanos),
+
     path('prueba-formula', views.prueba_formula),
     path('guardar-formula', views.guardar_formula),
     path('consultar-formula', views.consultar_formula),
     path('guardar-precios', views.guardar_precios),
     path('excel-precios', views.excel_precios),
+
     path('cambio-clave', views.cambio_clave),
     path('porcentajes-comisiones', views.porcentajes_comisiones),
     path('calcular-comisiones', views.calcular_comisiones),
+
     path('guardar-datos-corresponsal', views.guardar_datos_corresponsal),
     path('select-datos-corresponsal', views.select_datos_corresponsal),
     path('select-datos-corresponsal-cajero', views.select_datos_corresponsal_cajero),
     path('select-consignaciones-corresponsal-cajero', views.select_consignaciones_corresponsal_cajero),
     path('resumen-corresponsal', views.resumen_corresponsal),
     path('encargados-corresponsal', views.encargados_corresponsal),
+
     path('lista-usuarios', views.lista_usuarios),
     path('consignacion-corresponsal', views.consignacion_corresponsal),
     path('get-imagen-corresponsal', views.get_image_corresponsal),
@@ -52,48 +63,75 @@ urlpatterns = [
     path('settle-invoice', views.settle_invoice),
     path('black-list', views.black_list),
     path('black-list/<int:id>/', views.black_list),
+
     path('prices/', views.prices),
     path('prices/<int:id>/', views.prices),
     path('variables/', views.variables_prices),
     path('variables/<int:id>/', views.variables_prices),
     path('formulas/', views.formulas_prices),
     path('formulas/<int:id>/', views.formulas_prices),
-    path('actas/', actas_entrega, name='actas_entrega'),  # Para GET y POST
-    path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),  # Para GET, PUT, DELETE con id
+
+    path('actas/', actas_entrega, name='actas_entrega'),
+    path('actas/<int:id>/', actas_entrega, name='actas_entrega_id'),
+
     path('api/imagen-login/', views.obtener_imagen_login),
     path('api/imagen-login/actualizar/', views.actualizar_imagen_login),
+
     path('historico-pendientes-cajero/', views.historico_pendientes_cajero, name='historico_pendientes_cajero'),
     path('get_filtros_precios/', views.get_filtros_precios, name='get_filtros_precios'),
-    path('buscar-precios/', views.buscar_precios, name='buscar_precios'),   
+    path('buscar-precios/', views.buscar_precios, name='buscar_precios'),
     path('get_reportes_por_fecha/', views.get_reportes_por_fecha, name='get-reportes-por-fecha'),
     path('translate-products-prepago/admin', views.delete_translate_product_admin),
+
     path('sales-report/upload/', views.upload_sales_report, name='upload_sales_report'),
     path('sales-report/dashboard/', views.get_sales_dashboard_data, name='get_sales_dashboard_data'),
+
     path('api/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+
     path('comisiones/upload/', views.carga_comisiones_view, name='comision-upload'),
-    path('api/comisiones/consulta/', views.consulta_pdv_view, name='comision-consulta-pdv'), # <-- NUEVA RUTA
+    path('api/comisiones/consulta/', views.consulta_pdv_view, name='comision-consulta-pdv'),
+
     path('asesor/filtros/', views.filtros_reporte_view, name='asesor-filtros'),
     path('asesor/pdv-por-ruta/', views.pdv_por_ruta_view, name='asesor-pdv-por-ruta'),
     path('asesor/reporte/', views.reporte_asesor_view, name='asesor-reporte'),
+
     path('admin/usuarios-con-ruta/', views.usuarios_con_ruta_view, name='admin-usuarios-con-ruta'),
     path('admin/rutas/', views.lista_rutas_view, name='admin-lista-rutas'),
     path('admin/asignar-ruta/', views.asignar_ruta_view, name='admin-asignar-ruta'),
+
     path('asesor/comparativa/', views.reporte_comparativa_view, name='asesor-comparativa'),
     path('asesor/pagar-comisiones/', views.pagar_comisiones_view, name='pagar-comisiones'),
+
     path('admin/reporte-general/', views.reporte_general_view, name='reporte-general'),
     path('comisiones/consulta-agrupada/', views.consulta_agrupada_pdv_view, name='consulta-agrupada-pdv'),
     path('admin/exportar-reporte/', views.exportar_reporte_excel, name='exportar_reporte_excel'),
     path('admin/fecha-corte/', views.fecha_corte_view, name='fecha_corte'),
+
     path('admin/asesores/', views.asesor_list_create, name='asesor-list-create'),
     path('admin/asesores/<int:pk>/', views.asesor_detail, name='asesor-detail'),
     path('admin/asesores/<int:pk>/activar/', views.asesor_toggle_active, name='asesor-toggle-active'),
+
     path('admin/pagos/', views.admin_pago_list, name='admin-pago-list'),
     path('admin/pagos/<int:pk>/', views.admin_pago_detail, name='admin-pago-detail'),
     path('admin/puntos-de-venta/', views.admin_puntos_de_venta_list, name='admin-puntos-de-venta-list'),
+
     path('asesor/subir-comprobante/', views.subir_comprobante_view, name='subir-comprobante'),
     path('asesor/get-comprobante/', views.get_comprobante_view, name='get-comprobante'),
+
     path('admin/usuarios/activar/', views.toggle_user_active, name='toggle_user_active'),
     path('admin/cajeros/rol-caja/', views.toggle_cajero_role, name='toggle_cajero_role'),
     path('admin/usuarios/<str:username>/', views.usuario_detail, name='usuario_detail'),
+
+    # 🔴 NUEVAS RUTAS: comisiones pendientes admin (funciones + @admin_permission_required)
+    path(
+        'admin/comisiones-pendientes/',
+        views.comisiones_pendientes_list,
+        name='admin-comisiones-pendientes-list'
+    ),
+    path(
+        'admin/comisiones-pendientes/<int:pk>/',
+        views.comision_pendiente_detail,
+        name='admin-comisiones-pendientes-detail'
+    ),
 ]

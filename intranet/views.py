@@ -75,6 +75,17 @@ from django.contrib.postgres.aggregates import ArrayAgg
 from django.db.models import Value
 from .models import Permisos, Permisos_usuarios
 
+from rest_framework import viewsets, permissions
+from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
+from django.utils.dateparse import parse_date
+
+from .models import Comision, user_es_supervisor_comisiones
+from .serializers import ComisionPendienteAdminSerializer
+
+
+
 
 
 
@@ -692,7 +703,100 @@ def admin_pago_detail(request, pk):
                 {'detail': f'Error al reversar el pago: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-        
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 200
+
+    def get_paginated_response(self, data):
+        return Response({
+            'count': self.page.paginator.count,
+            'current_page': self.page.number,
+            'total_pages': self.page.paginator.num_pages,
+            'results': data
+        })
+
+
+
+@api_view(['GET'])
+@admin_permission_required
+def comisiones_pendientes_list(request):
+    """
+    GET /admin/comisiones-pendientes/
+
+    Filtros soportados:
+      - estado (por defecto: 'Pendiente')
+      - ruta
+      - asesor
+      - fecha_inicio, fecha_fin (YYYY-MM-DD)
+    """
+    qs = Comision.objects.all()
+
+    # Solo comisiones pendientes por defecto
+    estado = request.GET.get('estado') or 'Pendiente'
+    if estado:
+        qs = qs.filter(estado=estado)
+
+    ruta = request.GET.get('ruta')
+    if ruta:
+        qs = qs.filter(ruta=ruta)
+
+    asesor = request.GET.get('asesor')
+    if asesor:
+        qs = qs.filter(
+            Q(asesor__username=asesor) |
+            Q(asesor_identificador__icontains=asesor)
+        )
+
+    fecha_inicio = request.GET.get('fecha_inicio')
+    fecha_fin = request.GET.get('fecha_fin')
+
+    if fecha_inicio and fecha_fin:
+        fi = parse_date(fecha_inicio)
+        ff = parse_date(fecha_fin)
+        if fi and ff:
+            qs = qs.filter(
+                Q(mes_pago__range=(fi, ff)) |
+                Q(mes_pago__isnull=True, prim_llamada_activacion__range=(fi, ff))
+            )
+
+    # Que no tengan pago asociado
+    qs = qs.filter(pagos__isnull=True).order_by('-prim_llamada_activacion', '-fecha_carga', '-id')
+
+    # Paginación estilo DRF pero en función
+    paginator = StandardResultsSetPagination()
+    page = paginator.paginate_queryset(qs, request)
+    serializer = ComisionPendienteAdminSerializer(page, many=True)
+    return paginator.get_paginated_response(serializer.data)
+
+@api_view(['PUT', 'PATCH', 'DELETE'])
+@admin_permission_required
+def comision_pendiente_detail(request, pk):
+    """
+    PUT/PATCH/DELETE /admin/comisiones-pendientes/<id>/
+    """
+    try:
+        comision = Comision.objects.get(pk=pk, pagos__isnull=True)
+    except Comision.DoesNotExist:
+        return Response({'detail': 'Comisión no encontrada o ya está asociada a un pago.'}, status=404)
+
+    if request.method in ['PUT', 'PATCH']:
+        partial = (request.method == 'PATCH')
+        serializer = ComisionPendienteAdminSerializer(
+            comision,
+            data=request.data,
+            partial=partial
+        )
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=400)
+
+    elif request.method == 'DELETE':
+        comision.delete()
+        return Response(status=204)
+
         
 @api_view(['GET'])
 @admin_permission_required
@@ -2038,37 +2142,49 @@ def formulas_prices(request, id=None):
 def carga_comisiones_view(request):
     """
     Gestiona la subida y validación de archivos Excel para comisiones.
-    --- CORREGIDO para manejar meses en español ---
+    Valida que todos los registros pertenezcan a un único MES PAGO (ej: "Diciembre 2025").
     """
-    
+
     # === SECCIÓN 1: CHEQUEO DE PERMISOS ===
     if not models.Permisos_usuarios.objects.filter(
-        user=request.user, 
-        permiso__permiso='admin_comisiones', 
+        user=request.user,
+        permiso__permiso='admin_comisiones',
         tiene_permiso=True
     ).exists():
         return Response(
-            {'error': 'No tienes permiso para realizar esta acción.'}, 
+            {'error': 'No tienes permiso para realizar esta acción.'},
             status=status.HTTP_403_FORBIDDEN
         )
 
     # === SECCIÓN 2: VALIDACIÓN INICIAL DEL ARCHIVO ===
     archivo = request.FILES.get('file')
     if not archivo:
-        return Response({'error': 'No se proporcionó ningún archivo.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {'error': 'No se proporcionó ningún archivo.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # <--- 2. INICIO DEL BLOQUE DE LOCALE ---
     # Guardamos la configuración de idioma actual para restaurarla después
-    current_locale = locale.getlocale(locale.LC_TIME)
+    current_locale = locale.setlocale(locale.LC_TIME)
     try:
-        # Intentamos configurar el idioma a español (para Linux/macOS y Windows)
+        # Intentamos configurar el idioma a español (varios intentos según SO)
         try:
             locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
         except locale.Error:
-            locale.setlocale(locale.LC_TIME, 'Spanish')
+            try:
+                locale.setlocale(locale.LC_TIME, 'es_ES')
+            except locale.Error:
+                try:
+                    # Windows típico
+                    locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
+                except locale.Error:
+                    try:
+                        locale.setlocale(locale.LC_TIME, 'Spanish')
+                    except locale.Error:
+                        # Si nada funciona, seguimos con el locale actual
+                        pass
 
         # === SECCIÓN 3: VALIDACIÓN DE CONTENIDO DEL EXCEL ===
-        # Todo el bloque de validación de pandas va dentro del try del locale
         try:
             xls = pd.ExcelFile(archivo)
 
@@ -2078,47 +2194,68 @@ def carga_comisiones_view(request):
                     {'errores': [f'Archivo rechazado: Debe contener exactamente una hoja, pero se encontraron {len(xls.sheet_names)}.']},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-            
+
             df = pd.read_excel(xls, sheet_name=0, dtype=str)
 
-            # REGLA 2: La columna 'MES LIQUIDACIÓN' es obligatoria.
-            if 'MES LIQUIDACIÓN' not in df.columns:
+            # REGLA 2: La columna 'MES PAGO' es obligatoria.
+            if 'MES PAGO' not in df.columns:
                 return Response(
-                    {'errores': ['Archivo rechazado: Falta la columna obligatoria "MES LIQUIDACIÓN".']},
+                    {'errores': ['Archivo rechazado: Falta la columna obligatoria "MES PAGO".']},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # REGLA 3: Todos los registros deben pertenecer a un único mes.
-            # Esta línea ahora funcionará correctamente con meses en español.
-            meses = pd.to_datetime(df['MES LIQUIDACIÓN'], format='%B %Y', errors='coerce').dt.to_period('M')
-            
-            meses_unicos = meses.dropna().nunique()
+            # REGLA 3: Todos los registros deben pertenecer a un único mes de PAGO.
+            # En el Excel viene algo como: "Diciembre 2025"
+            col_mes_pago = (
+                df['MES PAGO']
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .str.replace(r'\s+', ' ', regex=True)  # normaliza espacios
+            )
+
+            # Ejemplo esperado tras normalización: "diciembre 2025"
+            meses_pago = pd.to_datetime(
+                col_mes_pago,
+                format='%B %Y',
+                errors='coerce'
+            ).dt.to_period('M')
+
+            meses_validos = meses_pago.dropna()
+            meses_unicos = meses_validos.nunique()
 
             if meses_unicos > 1:
-                return Response(
-                    {'errores': [f'Archivo rechazado: Solo se permite un mes por archivo, pero se encontraron {meses_unicos} meses diferentes.']},
-                    status=status.HTTP_400_BAD_REQUEST
+                meses_distintos = ", ".join(
+                    sorted({str(m) for m in meses_validos.unique()})
                 )
-            if meses_unicos == 0:
                 return Response(
-                    {'errores': ['Archivo rechazado: No se encontraron registros con un formato de mes válido (Ej: "octubre 2025").']},
+                    {'errores': [f'Archivo rechazado: Solo se permite un mes de PAGO por archivo, pero se encontraron estos meses: {meses_distintos}.']},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-        except Exception as e:
+            if meses_unicos == 0:
+                return Response(
+                    {'errores': ['Archivo rechazado: No se encontraron registros con un formato de mes válido en "MES PAGO" (Ej: "Diciembre 2025").']},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        except Exception:
             return Response(
-                {'errores': [f'No se pudo leer el archivo. Verifique que sea un formato Excel (.xlsx) válido.']},
+                {'errores': ['No se pudo leer el archivo. Verifique que sea un formato Excel (.xlsx) válido.']},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
     finally:
-        # <--- 3. RESTAURACIÓN DEL LOCALE ---
-        # Es crucial restaurar la configuración de idioma original para no afectar otras partes de la app.
-        locale.setlocale(locale.LC_TIME, current_locale)
-    
+        # Restauramos el locale original para no afectar otras partes de la app
+        try:
+            locale.setlocale(locale.LC_TIME, current_locale)
+        except Exception:
+            # En caso extremo de error, lo ignoramos para no romper la petición
+            pass
+
     # === SECCIÓN 4: GUARDADO Y EJECUCIÓN DE TAREA ASÍNCRONA ===
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_f:
-        archivo.seek(0) 
+        archivo.seek(0)
         for chunk in archivo.chunks():
             temp_f.write(chunk)
         file_path = temp_f.name
@@ -2126,7 +2263,7 @@ def carga_comisiones_view(request):
     procesar_archivo_comisiones.delay(file_path, request.user.id)
 
     return Response(
-        {'mensaje': 'Archivo validado y aceptado. El procesamiento ha comenzado en segundo plano.'}, 
+        {'mensaje': 'Archivo validado y aceptado. El procesamiento ha comenzado en segundo plano.'},
         status=status.HTTP_202_ACCEPTED
     )
 
@@ -2139,6 +2276,9 @@ def carga_comisiones_view(request):
         openapi.Parameter('id', openapi.IN_QUERY, description="ID de la acta (opcional)", type=openapi.TYPE_INTEGER)
     ]
 )
+
+
+
 @api_view(['GET', 'POST', 'PUT', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def actas_entrega(request, id=None):
@@ -4027,31 +4167,33 @@ def resumen_corresponsal(request):
     
 @api_view(['POST'])
 def select_datos_corresponsal(request):
-    import datetime
-    import pandas as pd
-    from django.utils import timezone
-    from django.db.models import Sum
-
     fecha = request.data.get('fecha')
     if not fecha:
         return Response({'error': 'Fecha requerida'}, status=400)
 
+    # ================= RANGO DE FECHAS PARA CAJERO (TRANSACCIONES) =================
     if len(fecha) == 7:
+        # Formato YYYY-MM -> todo el mes
         fecha_inicio_naive = pd.to_datetime(fecha).to_pydatetime()
         fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
     else:
-        fecha_inicio_naive = datetime.datetime.strptime(fecha, '%Y-%m-%d')
+        # Formato YYYY-MM-DD -> día específico
+        # OJO: aquí usamos datetime.strptime, no datetime.datetime.strptime
+        fecha_inicio_naive = datetime.strptime(fecha, '%Y-%m-%d')
         fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
 
     fecha_inicio = timezone.make_aware(fecha_inicio_naive)
     fecha_fin = timezone.make_aware(fecha_fin_naive)
 
-    transacciones = models.Transacciones_sucursal.objects.filter(fecha__range=(fecha_inicio, fecha_fin))
+    # ================= TRANSACCIONES DE CAJERO =================
+    transacciones = models.Transacciones_sucursal.objects.filter(
+        fecha__range=(fecha_inicio, fecha_fin)
+    )
     transacciones_data = list(transacciones.values())
 
     sucursales = models.Codigo_oficina.objects.all()
     sucursales_dict = [{'value': i.codigo, 'text': i.terminal} for i in sucursales]
-    
+
     if not transacciones_data:
         return Response({
             'consolidado': [],
@@ -4060,22 +4202,41 @@ def select_datos_corresponsal(request):
         })
 
     df_transacciones = pd.DataFrame(transacciones_data)
-    df_transacciones['valor'] = pd.to_numeric(df_transacciones['valor'], errors='coerce').fillna(0)
-    
-    cod_sucursales_map = {i.codigo: i.terminal for i in sucursales}
-    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(cod_sucursales_map)
+    df_transacciones['valor'] = pd.to_numeric(
+        df_transacciones['valor'], errors='coerce'
+    ).fillna(0)
 
+    # Mapear código de sucursal al nombre/terminal
+    cod_sucursales_map = {i.codigo: i.terminal for i in sucursales}
+    df_transacciones['codigo_incocredito'] = df_transacciones['codigo_incocredito'].map(
+        cod_sucursales_map
+    )
+
+    # Consolidado por sucursal (cajero)
     df_consolidado = df_transacciones.groupby('codigo_incocredito').agg(
         cuenta=('codigo_incocredito', 'size'),
         valor=('valor', 'sum')
     ).reset_index()
 
-    consignaciones_qs = models.Corresponsal_consignacion.objects.filter(fecha_consignacion__range=(fecha_inicio, fecha_fin))
-    
+    # ================= CONSIGNACIONES (DESFASE +1 DÍA) =================
+    # Ajustamos el rango de consignaciones un día hacia adelante
+    # para que las consignaciones registradas al día siguiente
+    # se comparen con las transacciones del día original.
+    consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
+        fecha_consignacion__range=(
+            fecha_inicio + timedelta(days=1),
+            fecha_fin + timedelta(days=1)
+        )
+    )
+
     if consignaciones_qs.exists():
-        df_consignaciones = pd.DataFrame(list(consignaciones_qs.values('codigo_incocredito', 'estado', 'valor')))
-        df_consignaciones['valor'] = pd.to_numeric(df_consignaciones['valor'], errors='coerce').fillna(0)
-        
+        df_consignaciones = pd.DataFrame(list(
+            consignaciones_qs.values('codigo_incocredito', 'estado', 'valor')
+        ))
+        df_consignaciones['valor'] = pd.to_numeric(
+            df_consignaciones['valor'], errors='coerce'
+        ).fillna(0)
+
         df_consignaciones_pivot = df_consignaciones.pivot_table(
             index='codigo_incocredito',
             columns='estado',
@@ -4083,31 +4244,45 @@ def select_datos_corresponsal(request):
             aggfunc='sum'
         ).reset_index()
 
-        df_consolidado = pd.merge(df_consolidado, df_consignaciones_pivot, on='codigo_incocredito', how='outer').fillna(0)
+        # Unimos cajero (valor) con consignaciones (pendiente, saldado, Conciliado)
+        df_consolidado = pd.merge(
+            df_consolidado,
+            df_consignaciones_pivot,
+            on='codigo_incocredito',
+            how='outer'
+        ).fillna(0)
     else:
         df_consolidado['pendiente'] = 0
         df_consolidado['saldado'] = 0
         df_consolidado['Conciliado'] = 0
 
+    # Asegurar columnas aunque no existan en el pivot
     for col in ['pendiente', 'saldado', 'Conciliado']:
         if col not in df_consolidado.columns:
             df_consolidado[col] = 0
 
+    # Sumar saldados + conciliados
     df_consolidado['saldado'] = df_consolidado['saldado'] + df_consolidado['Conciliado']
-    df_consolidado['restante'] = df_consolidado['valor'] - df_consolidado['pendiente'] - df_consolidado['saldado']
-    
+
+    # ================= CÁLCULO DEL RESTANTE =================
+    df_consolidado['restante'] = (
+        df_consolidado['valor'] -
+        df_consolidado['pendiente'] -
+        df_consolidado['saldado']
+    )
+
+    # Si NO quieres ver negativos nunca, puedes descomentar esta línea:
+    # df_consolidado['restante'] = df_consolidado['restante'].apply(lambda x: max(x, 0))
+
     columnas_finales = ['codigo_incocredito', 'cuenta', 'valor', 'pendiente', 'saldado', 'restante']
     consolidado = df_consolidado[columnas_finales].to_dict(orient='records')
-    
+
     return Response({
         'consolidado': consolidado,
         'sucursales': sucursales_dict,
         'data': transacciones_data
     })
-
-
-
-
+    
 @api_view(['POST'])
 @cajero_permission_required  # <--- 1. APLICA EL DECORADOR
 def select_datos_corresponsal_cajero(request):
