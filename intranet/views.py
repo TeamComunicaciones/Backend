@@ -294,10 +294,9 @@ def transparency_report_view(request):
 
         body = "\n".join(lines)
 
-       # --------- Enviar correo ---------
+        # --------- Enviar correo ---------
         to_email = "manuel.arango@teamcomunicaciones.com"
 
-        # Intentamos usar DEFAULT_FROM_EMAIL, si no, EMAIL_HOST_USER, y si no, to_email
         configured_from = (
             getattr(settings, "DEFAULT_FROM_EMAIL", "") 
             or getattr(settings, "EMAIL_HOST_USER", "")
@@ -311,7 +310,6 @@ def transparency_report_view(request):
         )
         
         # --------- DEBUG EMAIL CONFIG ---------
-        logger.info(f"[Transparency] EMAIL_HOST_USER = {repr(settings.EMAIL_HOST_USER)}")
         logger.info(f"[Transparency] EMAIL_HOST_PASSWORD_SET = {bool(getattr(settings, 'EMAIL_HOST_PASSWORD', None))}")
 
         conn = get_connection()
@@ -355,6 +353,7 @@ def transparency_report_view(request):
             },
             status=500,
         )
+
 
 
 class MisRolesView(APIView):
