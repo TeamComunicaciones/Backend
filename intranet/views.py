@@ -18,6 +18,15 @@ import uuid
 import decimal
 import unicodedata
 
+import logging
+from datetime import datetime
+
+from django.conf import settings
+from django.core.mail import EmailMessage
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
+
 from collections import defaultdict
 from datetime import datetime, date, timedelta, time
 from decimal import Decimal, InvalidOperation
@@ -43,6 +52,7 @@ from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidTokenError
 
 # Third-party file processing libraries
 from openpyxl import Workbook
+from .models import TransparencyReport  # 👈 MUY IMPORTANTE
 
 # Third-party Django/DRF specific libraries
 from drf_yasg import openapi
@@ -121,6 +131,201 @@ from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
 from rest_framework.views import APIView
 
+logger = logging.getLogger(__name__)
+
+def _get_client_ip(request):
+    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(",")[0].strip()
+    else:
+        ip = request.META.get("REMOTE_ADDR")
+    return ip
+
+@csrf_exempt
+@require_POST
+def transparency_report_view(request):
+    try:
+        def parse_bool(value, default=False):
+            if value is None:
+                return default
+            return str(value).strip().lower() in ["true", "1", "yes", "on", "si", "sí"]
+
+        # --------- Campos básicos ---------
+        locale = request.POST.get("locale", "es")  # 'es' o 'en'
+        report_type = request.POST.get("report_type", "other") or "other"
+        description = request.POST.get("description", "").strip()
+
+        if not description:
+            return JsonResponse(
+                {"success": False, "message": "La descripción es obligatoria."},
+                status=400,
+            )
+
+        # Fecha del suceso
+        event_date_str = request.POST.get("event_date") or ""
+        event_date = None
+        if event_date_str:
+            try:
+                event_date = datetime.strptime(event_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                logger.warning(f"Fecha inválida en transparency_report: {event_date_str}")
+
+        # Ubicación
+        country = request.POST.get("country", "").strip()
+        state = request.POST.get("state", "").strip()
+        city = request.POST.get("city", "").strip()
+
+        # Personas y soportes
+        people_involved = request.POST.get("people_involved", "").strip()
+        supports_text = request.POST.get("supports_text", "").strip()
+
+        # Identificación / anonimato
+        wants_identification = parse_bool(request.POST.get("wants_identification"), False)
+        is_anonymous = not wants_identification
+
+        full_name = request.POST.get("full_name", "").strip() if wants_identification else ""
+        id_number = request.POST.get("id_number", "").strip() if wants_identification else ""
+        email = request.POST.get("email", "").strip() if wants_identification else ""
+        phone = request.POST.get("phone", "").strip() if wants_identification else ""
+
+        # Adjuntos
+        files = request.FILES.getlist("attachments")
+        attachments_count = len(files)
+
+        # Info técnica
+        ip_address = _get_client_ip(request)
+        user_agent = request.META.get("HTTP_USER_AGENT", "")
+
+        # --------- Guardar en BD ---------
+        report = TransparencyReport.objects.create(
+            report_type=report_type,
+            description=description,
+            event_date=event_date,
+            country=country,
+            state=state,
+            city=city,
+            people_involved=people_involved,
+            supports_text=supports_text,
+            wants_identification=wants_identification,
+            is_anonymous=is_anonymous,
+            full_name=full_name,
+            id_number=id_number,
+            email=email,
+            phone=phone,
+            locale=locale,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            attachments_count=attachments_count,
+        )
+
+        # --------- Construcción de correo ---------
+        subject_es = "Nueva denuncia en la Línea de Transparencia"
+        subject_en = "New report in the Transparency Line"
+        subject = f"{subject_es} / {subject_en}"
+
+        if is_anonymous:
+            header_es = "Tipo de reporte: Anónimo"
+            header_en = "Report type: Anonymous"
+        else:
+            header_es = "Tipo de reporte: Con identificación"
+            header_en = "Report type: Identified"
+
+        report_type_label = report.get_report_type_display()
+
+        lines = [
+            "LÍNEA DE TRANSPARENCIA – CANAL DE DENUNCIAS",
+            "",
+            header_es,
+            header_en,
+            "",
+            f"Fecha de envío: {report.created_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"IP: {ip_address}",
+            "",
+            "========================================",
+            "INFORMACIÓN DEL REPORTE / REPORT INFO",
+            "========================================",
+            "",
+            f"Tipo de reporte / Report type: {report_type_label}",
+            f"Fecha del suceso / Event date: {event_date.isoformat() if event_date else 'No especificada / Not specified'}",
+            "",
+            "Ubicación / Location:",
+            f"  País / Country: {country or 'N/A'}",
+            f"  Departamento / State: {state or 'N/A'}",
+            f"  Ciudad / City: {city or 'N/A'}",
+            "",
+            "Descripción (ES/EN):",
+            description,
+            "",
+            "Personas involucradas / People involved:",
+            people_involved or "N/A",
+            "",
+            "Soportes y comentarios adicionales / Supporting info:",
+            supports_text or "N/A",
+            "",
+            "----------------------------------------",
+            "DATOS DEL REPORTANTE / REPORTER DETAILS",
+            "----------------------------------------",
+        ]
+
+        if is_anonymous:
+            lines += [
+                "El reportante decidió permanecer en el anonimato.",
+                "The whistleblower chose to remain anonymous.",
+            ]
+        else:
+            lines += [
+                f"Nombre / Full name: {full_name or 'N/A'}",
+                f"Identificación / ID number: {id_number or 'N/A'}",
+                f"Correo / Email: {email or 'N/A'}",
+                f"Teléfono / Phone: {phone or 'N/A'}",
+            ]
+
+        lines += [
+            "",
+            "----------------------------------------",
+            f"Archivos adjuntos / Attachments: {attachments_count}",
+        ]
+
+        body = "\n".join(lines)
+
+        # --------- Enviar correo ---------
+        to_email = "manuel.arango@teamcomunicaciones.com"
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", to_email)
+
+        email_message = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=from_email,
+            to=[to_email],
+        )
+
+        for f in files:
+            email_message.attach(f.name, f.read(), f.content_type)
+
+        email_message.send(fail_silently=False)
+
+        logger.info(
+            f"Transparency report #{report.id} enviado a {to_email} con {attachments_count} adjunto(s)."
+        )
+
+        return JsonResponse(
+            {
+                "success": True,
+                "message": "El reporte ha sido enviado correctamente.",
+                "id": report.id,
+            },
+            status=201,
+        )
+
+    except Exception:
+        logger.exception("Error al procesar el formulario de Línea de Transparencia")
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Ocurrió un error al procesar el reporte.",
+            },
+            status=500,
+        )
 
 
 class MisRolesView(APIView):
