@@ -145,6 +145,9 @@ def _get_client_ip(request):
 @require_POST
 def transparency_report_view(request):
     try:
+        logger.info(f"[Transparency] EMAIL_HOST_USER = {repr(settings.EMAIL_HOST_USER)}")
+        logger.info(f"[Transparency] DEFAULT_FROM_EMAIL = {repr(getattr(settings, 'DEFAULT_FROM_EMAIL', None))}")
+       
         def parse_bool(value, default=False):
             if value is None:
                 return default
