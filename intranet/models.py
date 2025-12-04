@@ -345,3 +345,58 @@ class IvaExcepcion(models.Model):
 
     def __str__(self):
         return f"{self.producto} ({self.tipo})"
+class TransparencyReport(models.Model):
+    REPORT_TYPES = [
+        ("corruption", "Corrupción / Corruption"),
+        ("transnational_bribery", "Soborno transnacional / Transnational bribery"),
+        ("fraud", "Fraude / Fraud"),
+        ("misuse_resources", "Uso inadecuado de recursos / Misuse of resources"),
+        (
+            "regulatory_irregularities",
+            "Irregularidades en el cumplimiento de normas / Regulatory irregularities",
+        ),
+        ("money_laundering", "Lavado de activos / Money laundering"),
+        ("terrorism_financing", "Financiación del terrorismo / Terrorism financing"),
+        (
+            "wmd_financing",
+            "Financiamiento de armas de destrucción masiva / WMD financing",
+        ),
+        ("other", "Otros / Other"),
+    ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    report_type = models.CharField(
+        max_length=64,
+        choices=REPORT_TYPES,
+        default="other",
+    )
+    description = models.TextField()
+    event_date = models.DateField(null=True, blank=True)
+
+    country = models.CharField(max_length=100, blank=True)
+    state = models.CharField("Departamento / Estado", max_length=100, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+
+    people_involved = models.TextField(blank=True)
+    supports_text = models.TextField(blank=True)
+
+    wants_identification = models.BooleanField(default=False)
+    is_anonymous = models.BooleanField(default=True)
+
+    full_name = models.CharField(max_length=255, blank=True)
+    id_number = models.CharField(max_length=100, blank=True)
+    email = models.EmailField(blank=True)
+    phone = models.CharField(max_length=50, blank=True)
+
+    locale = models.CharField(max_length=10, blank=True)  # "es" o "en"
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+
+    attachments_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.get_report_type_display()} - {self.created_at:%Y-%m-%d %H:%M}"

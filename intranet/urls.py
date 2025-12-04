@@ -1,14 +1,12 @@
 from django.urls import path, include
 from rest_framework import routers
-from . import viewsets   # Si no lo usas, luego lo puedes borrar
+from . import viewsets
 from . import views
 from .views import actas_entrega
 from .views import CustomTokenObtainPairView
 from rest_framework_simplejwt.views import TokenRefreshView
 
 router = routers.SimpleRouter()
-# Nota: aquí NO registramos comisiones-pendientes en el router,
-# porque las estamos manejando con vistas basadas en función.
 
 urlpatterns = [
     path('', include(router.urls)),
@@ -123,7 +121,6 @@ urlpatterns = [
     path('admin/cajeros/rol-caja/', views.toggle_cajero_role, name='toggle_cajero_role'),
     path('admin/usuarios/<str:username>/', views.usuario_detail, name='usuario_detail'),
 
-    # 🔴 NUEVAS RUTAS: comisiones pendientes admin (funciones + @admin_permission_required)
     path(
         'admin/comisiones-pendientes/',
         views.comisiones_pendientes_list,
@@ -133,5 +130,11 @@ urlpatterns = [
         'admin/comisiones-pendientes/<int:pk>/',
         views.comision_pendiente_detail,
         name='admin-comisiones-pendientes-detail'
+    ),
+
+    path(
+        'transparency-report/',
+        views.transparency_report_view,
+        name='transparency-report'
     ),
 ]
