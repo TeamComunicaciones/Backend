@@ -18,6 +18,7 @@ import uuid
 import decimal
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
+from .tasks import enviar_transparency_email
 
 import unicodedata
 
@@ -148,15 +149,16 @@ def _get_client_ip(request):
 @require_POST
 def transparency_report_view(request):
     try:
-        logger.info(f"[Transparency] EMAIL_HOST_USER = {repr(settings.EMAIL_HOST_USER)}")
-        logger.info(f"[Transparency] DEFAULT_FROM_EMAIL = {repr(getattr(settings, 'DEFAULT_FROM_EMAIL', None))}")
-       
         def parse_bool(value, default=False):
             if value is None:
                 return default
             return str(value).strip().lower() in ["true", "1", "yes", "on", "si", "sí"]
 
         # --------- Campos básicos ---------
+        # OJO: estos nombres deben coincidir con lo que mandas desde el front:
+        # locale, report_type, description, event_date, country, state, city,
+        # people_involved, supports_text, wants_identification, full_name,
+        # id_number, email, phone
         locale = request.POST.get("locale", "es")  # 'es' o 'en'
         report_type = request.POST.get("report_type", "other") or "other"
         description = request.POST.get("description", "").strip()
@@ -194,7 +196,7 @@ def transparency_report_view(request):
         email = request.POST.get("email", "").strip() if wants_identification else ""
         phone = request.POST.get("phone", "").strip() if wants_identification else ""
 
-        # Adjuntos
+        # Adjuntos (el front debe mandar: formData.append('attachments', file))
         files = request.FILES.getlist("attachments")
         attachments_count = len(files)
 
@@ -224,7 +226,7 @@ def transparency_report_view(request):
             attachments_count=attachments_count,
         )
 
-        # --------- Construcción de correo ---------
+        # --------- Construcción de correo (solo texto plano) ---------
         subject_es = "Nueva denuncia en la Línea de Transparencia"
         subject_en = "New report in the Transparency Line"
         subject = f"{subject_es} / {subject_en}"
@@ -294,45 +296,35 @@ def transparency_report_view(request):
 
         body = "\n".join(lines)
 
-        # --------- Enviar correo ---------
+        # --------- Preparar adjuntos para Celery ---------
+        attachments_payload = []
+        for f in files:
+            try:
+                content = f.read()
+                content_b64 = base64.b64encode(content).decode("ascii")
+                attachments_payload.append(
+                    {
+                        "name": f.name,
+                        "content_b64": content_b64,
+                        "content_type": getattr(f, "content_type", "application/octet-stream"),
+                    }
+                )
+            except Exception as e:
+                logger.error(f"[Transparency] Error leyendo archivo adjunto {f.name}: {e}")
+
+        # --------- Enviar correo vía Celery ---------
         to_email = "manuel.arango@teamcomunicaciones.com"
 
-        configured_from = (
-            getattr(settings, "DEFAULT_FROM_EMAIL", "") 
-            or getattr(settings, "EMAIL_HOST_USER", "")
-        )
-        from_email = configured_from or to_email
-
-        logger.info(
-            f"[Transparency] EMAIL_HOST_USER={getattr(settings, 'EMAIL_HOST_USER', None)!r}, "
-            f"DEFAULT_FROM_EMAIL={getattr(settings, 'DEFAULT_FROM_EMAIL', None)!r}, "
-            f"from_email used={from_email!r}"
-        )
-        
-        # --------- DEBUG EMAIL CONFIG ---------
-        logger.info(f"[Transparency] EMAIL_HOST_PASSWORD_SET = {bool(getattr(settings, 'EMAIL_HOST_PASSWORD', None))}")
-
-        conn = get_connection()
-        logger.info(
-            f"[Transparency] SMTP username = {repr(getattr(conn, 'username', None))}, "
-            f"has_password = {bool(getattr(conn, 'password', None))}"
-        )
-        # --------- FIN DEBUG ---------
-
-        email_message = EmailMessage(
+        enviar_transparency_email.delay(
             subject=subject,
             body=body,
-            from_email=from_email,
-            to=[to_email],
+            to_email=to_email,
+            attachments=attachments_payload,
         )
 
-        for f in files:
-            email_message.attach(f.name, f.read(), f.content_type)
-
-        email_message.send(fail_silently=False)
-
         logger.info(
-            f"Transparency report #{report.id} enviado a {to_email} con {attachments_count} adjunto(s)."
+            f"[Transparency] Report #{report.id} encolado para envío de correo a {to_email} "
+            f"con {attachments_count} adjunto(s)."
         )
 
         return JsonResponse(
@@ -353,6 +345,7 @@ def transparency_report_view(request):
             },
             status=500,
         )
+
 
 
 
