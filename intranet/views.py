@@ -288,9 +288,21 @@ def transparency_report_view(request):
 
         body = "\n".join(lines)
 
-        # --------- Enviar correo ---------
+       # --------- Enviar correo ---------
         to_email = "manuel.arango@teamcomunicaciones.com"
-        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", to_email)
+
+        # Intentamos usar DEFAULT_FROM_EMAIL, si no, EMAIL_HOST_USER, y si no, to_email
+        configured_from = (
+            getattr(settings, "DEFAULT_FROM_EMAIL", "") 
+            or getattr(settings, "EMAIL_HOST_USER", "")
+        )
+        from_email = configured_from or to_email
+
+        logger.info(
+            f"[Transparency] EMAIL_HOST_USER={getattr(settings, 'EMAIL_HOST_USER', None)!r}, "
+            f"DEFAULT_FROM_EMAIL={getattr(settings, 'DEFAULT_FROM_EMAIL', None)!r}, "
+            f"from_email used={from_email!r}"
+        )
 
         email_message = EmailMessage(
             subject=subject,
