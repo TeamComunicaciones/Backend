@@ -16,6 +16,9 @@ import tempfile
 import traceback
 import uuid
 import decimal
+from django.conf import settings
+from django.core.mail import EmailMessage, get_connection
+
 import unicodedata
 
 import logging
@@ -139,7 +142,7 @@ def _get_client_ip(request):
         ip = x_forwarded_for.split(",")[0].strip()
     else:
         ip = request.META.get("REMOTE_ADDR")
-    return ip
+    return ip   
 
 @csrf_exempt
 @require_POST
@@ -306,6 +309,17 @@ def transparency_report_view(request):
             f"DEFAULT_FROM_EMAIL={getattr(settings, 'DEFAULT_FROM_EMAIL', None)!r}, "
             f"from_email used={from_email!r}"
         )
+        
+        # --------- DEBUG EMAIL CONFIG ---------
+        logger.info(f"[Transparency] EMAIL_HOST_USER = {repr(settings.EMAIL_HOST_USER)}")
+        logger.info(f"[Transparency] EMAIL_HOST_PASSWORD_SET = {bool(getattr(settings, 'EMAIL_HOST_PASSWORD', None))}")
+
+        conn = get_connection()
+        logger.info(
+            f"[Transparency] SMTP username = {repr(getattr(conn, 'username', None))}, "
+            f"has_password = {bool(getattr(conn, 'password', None))}"
+        )
+        # --------- FIN DEBUG ---------
 
         email_message = EmailMessage(
             subject=subject,
