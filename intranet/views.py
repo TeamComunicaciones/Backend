@@ -955,6 +955,7 @@ def comisiones_pendientes_list(request):
       - estado (por defecto: 'Pendiente')
       - ruta
       - asesor
+      - idpos
       - fecha_inicio, fecha_fin (YYYY-MM-DD)
     """
     qs = Comision.objects.all()
@@ -975,6 +976,15 @@ def comisiones_pendientes_list(request):
             Q(asesor_identificador__icontains=asesor)
         )
 
+    # 🔎 NUEVO: filtro por ID POS
+    idpos = request.GET.get('idpos')
+    if idpos:
+        # si quieres coincidencia parcial:
+        qs = qs.filter(idpos__icontains=idpos)
+
+        # si prefieres exacta, usa esto en vez de lo de arriba:
+        # qs = qs.filter(idpos=idpos)
+
     fecha_inicio = request.GET.get('fecha_inicio')
     fecha_fin = request.GET.get('fecha_fin')
 
@@ -988,7 +998,11 @@ def comisiones_pendientes_list(request):
             )
 
     # Que no tengan pago asociado
-    qs = qs.filter(pagos__isnull=True).order_by('-prim_llamada_activacion', '-fecha_carga', '-id')
+    qs = qs.filter(pagos__isnull=True).order_by(
+        '-prim_llamada_activacion',
+        '-fecha_carga',
+        '-id'
+    )
 
     # Paginación estilo DRF pero en función
     paginator = StandardResultsSetPagination()
