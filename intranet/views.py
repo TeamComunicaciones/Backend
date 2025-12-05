@@ -952,7 +952,7 @@ def comisiones_pendientes_list(request):
     GET /admin/comisiones-pendientes/
 
     Filtros soportados:
-      - estado (por defecto: 'Pendiente')
+      - estado (puede venir varias veces: ?estado=Pendiente&estado=Acumulada)
       - ruta
       - asesor
       - idpos
@@ -960,10 +960,12 @@ def comisiones_pendientes_list(request):
     """
     qs = Comision.objects.all()
 
-    # Solo comisiones pendientes por defecto
-    estado = request.GET.get('estado') or 'Pendiente'
-    if estado:
-        qs = qs.filter(estado=estado)
+    # 🔹 Estados: si no viene nada, por defecto Pendiente + Acumulada
+    estados = request.GET.getlist('estado')
+    if estados:
+        qs = qs.filter(estado__in=estados)
+    else:
+        qs = qs.filter(estado__in=['Pendiente', 'Acumulada'])
 
     ruta = request.GET.get('ruta')
     if ruta:
@@ -976,14 +978,10 @@ def comisiones_pendientes_list(request):
             Q(asesor_identificador__icontains=asesor)
         )
 
-    # 🔎 NUEVO: filtro por ID POS
+    # 🔎 Filtro por ID POS (parcial, si lo quieres exacto cambia a idpos=idpos)
     idpos = request.GET.get('idpos')
     if idpos:
-        # si quieres coincidencia parcial:
         qs = qs.filter(idpos__icontains=idpos)
-
-        # si prefieres exacta, usa esto en vez de lo de arriba:
-        # qs = qs.filter(idpos=idpos)
 
     fecha_inicio = request.GET.get('fecha_inicio')
     fecha_fin = request.GET.get('fecha_fin')
@@ -1009,6 +1007,7 @@ def comisiones_pendientes_list(request):
     page = paginator.paginate_queryset(qs, request)
     serializer = ComisionPendienteAdminSerializer(page, many=True)
     return paginator.get_paginated_response(serializer.data)
+
 
 @api_view(['PUT', 'PATCH', 'DELETE'])
 @admin_permission_required
