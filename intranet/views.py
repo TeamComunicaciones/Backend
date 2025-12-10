@@ -944,69 +944,185 @@ class StandardResultsSetPagination(PageNumberPagination):
         })
 
 
-
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @admin_permission_required
 def comisiones_pendientes_list(request):
     """
     GET /admin/comisiones-pendientes/
+    POST /admin/comisiones-pendientes/
 
-    Filtros soportados:
+    GET - Filtros soportados:
       - estado (puede venir varias veces: ?estado=Pendiente&estado=Acumulada)
       - ruta
       - asesor
       - idpos
       - fecha_inicio, fecha_fin (YYYY-MM-DD)
+
+    POST - Crea una comisión pendiente manual:
+      Campos esperados:
+        - idpos (str)
+        - ruta (str)
+        - asesor_username (str)  -> username del User
+        - mes_pago (YYYY-MM-DD)
+        - valor_comision (decimal)
+        - observacion (str, opcional)
     """
-    qs = Comision.objects.all()
 
-    # 🔹 Estados: si no viene nada, por defecto Pendiente + Acumulada
-    estados = request.GET.getlist('estado')
-    if estados:
-        qs = qs.filter(estado__in=estados)
-    else:
-        qs = qs.filter(estado__in=['Pendiente', 'Acumulada'])
+    # ------------------------- GET -------------------------
+    if request.method == 'GET':
+        qs = Comision.objects.all()
 
-    ruta = request.GET.get('ruta')
-    if ruta:
-        qs = qs.filter(ruta=ruta)
+        # 🔹 Estados: si no viene nada, por defecto Pendiente + Acumulada
+        estados = request.GET.getlist('estado')
+        if estados:
+            qs = qs.filter(estado__in=estados)
+        else:
+            qs = qs.filter(estado__in=['Pendiente', 'Acumulada'])
 
-    asesor = request.GET.get('asesor')
-    if asesor:
-        qs = qs.filter(
-            Q(asesor__username=asesor) |
-            Q(asesor_identificador__icontains=asesor)
-        )
+        ruta = request.GET.get('ruta')
+        if ruta:
+            qs = qs.filter(ruta=ruta)
 
-    # 🔎 Filtro por ID POS (parcial, si lo quieres exacto cambia a idpos=idpos)
-    idpos = request.GET.get('idpos')
-    if idpos:
-        qs = qs.filter(idpos__icontains=idpos)
-
-    fecha_inicio = request.GET.get('fecha_inicio')
-    fecha_fin = request.GET.get('fecha_fin')
-
-    if fecha_inicio and fecha_fin:
-        fi = parse_date(fecha_inicio)
-        ff = parse_date(fecha_fin)
-        if fi and ff:
+        asesor = request.GET.get('asesor')
+        if asesor:
             qs = qs.filter(
-                Q(mes_pago__range=(fi, ff)) |
-                Q(mes_pago__isnull=True, prim_llamada_activacion__range=(fi, ff))
+                Q(asesor__username=asesor) |
+                Q(asesor_identificador__icontains=asesor)
             )
 
-    # Que no tengan pago asociado
-    qs = qs.filter(pagos__isnull=True).order_by(
-        '-prim_llamada_activacion',
-        '-fecha_carga',
-        '-id'
-    )
+        # 🔎 Filtro por ID POS (parcial)
+        idpos = request.GET.get('idpos')
+        if idpos:
+            qs = qs.filter(idpos__icontains=idpos)
 
-    # Paginación estilo DRF pero en función
-    paginator = StandardResultsSetPagination()
-    page = paginator.paginate_queryset(qs, request)
-    serializer = ComisionPendienteAdminSerializer(page, many=True)
-    return paginator.get_paginated_response(serializer.data)
+        fecha_inicio = request.GET.get('fecha_inicio')
+        fecha_fin = request.GET.get('fecha_fin')
+
+        if fecha_inicio and fecha_fin:
+            fi = parse_date(fecha_inicio)
+            ff = parse_date(fecha_fin)
+            if fi and ff:
+                qs = qs.filter(
+                    Q(mes_pago__range=(fi, ff)) |
+                    Q(mes_pago__isnull=True, prim_llamada_activacion__range=(fi, ff))
+                )
+
+        # 🔴 CAMBIO IMPORTANTE:
+        #  - Comisiones "normales" aún sin pago: pagos__isnull=True
+        #  - Comisiones de SALDO PENDIENTE (parciales): las queremos ver aunque tengan pago asociado
+        qs = qs.filter(
+            Q(pagos__isnull=True) |
+            Q(producto__startswith="SALDO PENDIENTE")
+        ).order_by(
+            '-prim_llamada_activacion',
+            '-fecha_carga',
+            '-id'
+        )
+
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = ComisionPendienteAdminSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+    # ------------------------- POST -------------------------
+    # Crear comisión pendiente manual
+    if request.method == 'POST':
+        data = request.data
+        errors = {}
+
+        idpos = data.get('idpos')
+        ruta = data.get('ruta')
+        asesor_username = data.get('asesor_username')
+        mes_pago_str = data.get('mes_pago')
+        observacion = data.get('observacion', '')
+        valor_raw = data.get('valor_comision')
+
+        # 🔸 Validaciones básicas
+        if not idpos:
+            errors.setdefault('idpos', []).append('Este campo es obligatorio.')
+        if not ruta:
+            errors.setdefault('ruta', []).append('Este campo es obligatorio.')
+        if not asesor_username:
+            errors.setdefault('asesor_username', []).append('Este campo es obligatorio.')
+        if not mes_pago_str:
+            errors.setdefault('mes_pago', []).append('Este campo es obligatorio.')
+        if valor_raw in (None, ''):
+            errors.setdefault('valor_comision', []).append('Este campo es obligatorio.')
+
+        # 🔸 Parseo de fecha
+        mes_pago_date = None
+        if mes_pago_str:
+            mes_pago_date = parse_date(mes_pago_str)
+            if not mes_pago_date:
+                errors.setdefault('mes_pago', []).append(
+                    'Formato inválido. Usa YYYY-MM-DD (ej: 2025-12-01).'
+                )
+
+        # 🔸 Parseo de valor
+        valor_decimal = None
+        if valor_raw not in (None, ''):
+            try:
+                valor_decimal = Decimal(str(valor_raw))
+            except (InvalidOperation, TypeError):
+                errors.setdefault('valor_comision', []).append(
+                    'Debe ser un número válido.'
+                )
+
+        # 🔸 Usuario asesor
+        user = None
+        if asesor_username:
+            user = User.objects.filter(username=asesor_username).first()
+            if not user:
+                errors.setdefault('asesor_username', []).append(
+                    'No existe un usuario con ese username.'
+                )
+
+        if errors:
+            return Response(errors, status=400)
+
+        with transaction.atomic():
+            # Intentamos copiar datos de una comisión previa de ese IDPOS
+            base_comision = (
+                Comision.objects.filter(idpos=idpos)
+                .order_by('-prim_llamada_activacion', '-fecha_carga', '-id')
+                .first()
+            )
+
+            comision = Comision(
+                asesor=user,
+                asesor_identificador=(
+                    user.get_full_name() or user.username
+                    if user else asesor_username
+                ),
+                iccid=(
+                    base_comision.iccid
+                    if base_comision else f"MANUAL-{timezone.now().strftime('%Y%m%d%H%M%S')}"
+                ),
+                distribuidor=base_comision.distribuidor if base_comision else None,
+                producto=base_comision.producto if base_comision else None,
+                co_id=base_comision.co_id if base_comision else None,
+                prim_llamada_activacion=(
+                    base_comision.prim_llamada_activacion
+                    if base_comision else mes_pago_date
+                ),
+                min=base_comision.min if base_comision else None,
+                idpos=idpos,
+                punto_de_venta=(
+                    base_comision.punto_de_venta if base_comision else 'MANUAL'
+                ),
+                ruta=ruta,
+                comision_final=valor_decimal,
+                pago=None,
+                pagos=None,
+                mes_liquidacion=mes_pago_date,
+                mes_pago=mes_pago_date,
+                estado='Pendiente',
+                observacion=observacion,
+            )
+            comision.save()
+
+            serializer = ComisionPendienteAdminSerializer(comision)
+            return Response(serializer.data, status=201)
 
 
 @api_view(['PUT', 'PATCH', 'DELETE'])
