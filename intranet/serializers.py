@@ -168,6 +168,8 @@ class ComisionPendienteAdminSerializer(serializers.ModelSerializer):
       - valor_comision (comision_final)
       - estado
       - observacion
+      - es_saldo_pendiente (bool)
+      - estado_front (ej: 'Parcial' si es saldo pendiente)
     """
     asesor_username = serializers.CharField(source='asesor.username', read_only=True)
 
@@ -181,6 +183,10 @@ class ComisionPendienteAdminSerializer(serializers.ModelSerializer):
 
     fecha_referencia = serializers.SerializerMethodField()
 
+    # 🔹 NUEVOS CAMPOS
+    es_saldo_pendiente = serializers.SerializerMethodField()
+    estado_front = serializers.SerializerMethodField()
+
     class Meta:
         model = Comision
         fields = [
@@ -193,6 +199,8 @@ class ComisionPendienteAdminSerializer(serializers.ModelSerializer):
             'valor_comision',
             'estado',
             'observacion',
+            'es_saldo_pendiente',
+            'estado_front',
         ]
 
     def get_fecha_referencia(self, obj):
@@ -201,6 +209,20 @@ class ComisionPendienteAdminSerializer(serializers.ModelSerializer):
         Usamos mes_liquidacion y, si no, la prim_llamada_activacion.
         """
         return obj.mes_liquidacion or obj.prim_llamada_activacion
+
+    def get_es_saldo_pendiente(self, obj):
+        producto = (obj.producto or '').upper()
+        return producto.startswith("SALDO PENDIENTE")
+
+    def get_estado_front(self, obj):
+        """
+        Estado "derivado" para el front:
+          - Si es SALDO PENDIENTE -> 'Parcial'
+          - Si no, usa el estado real.
+        """
+        if self.get_es_saldo_pendiente(obj):
+            return "Parcial"
+        return obj.estado
 
 
 # ----------------- ASESORES (ADMIN COMISIONES) -----------------
