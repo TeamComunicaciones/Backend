@@ -1130,14 +1130,39 @@ def comisiones_pendientes_list(request):
 def comision_pendiente_detail(request, pk):
     """
     PUT/PATCH/DELETE /admin/comisiones-pendientes/<id>/
+
+    ✅ Ahora permite editar comisiones aunque tengan pago asociado
+       (por ejemplo, SALDO PENDIENTE PAGO #X).
     """
     try:
-        comision = Comision.objects.get(pk=pk, pagos__isnull=True)
+        # 🔹 Antes: Comision.objects.get(pk=pk, pagos__isnull=True)
+        #    Eso rompía las parciales porque ya tienen pago asociado.
+        comision = Comision.objects.get(pk=pk)
     except Comision.DoesNotExist:
-        return Response({'detail': 'Comisión no encontrada o ya está asociada a un pago.'}, status=404)
+        return Response(
+            {'detail': 'Comisión no encontrada.'},
+            status=404
+        )
 
+    # ---------- PUT / PATCH (editar) ----------
     if request.method in ['PUT', 'PATCH']:
         partial = (request.method == 'PATCH')
+
+        # (Opcional) Si quieres limitar qué campos se pueden editar,
+        # puedes filtrar request.data aquí:
+        #
+        # data = request.data.copy()
+        # campos_permitidos = {'mes_pago', 'estado', 'observacion', 'valor_comision'}
+        # for key in list(data.keys()):
+        #     if key not in campos_permitidos:
+        #         data.pop(key, None)
+        #
+        # serializer = ComisionPendienteAdminSerializer(
+        #     comision,
+        #     data=data,
+        #     partial=partial,
+        # )
+
         serializer = ComisionPendienteAdminSerializer(
             comision,
             data=request.data,
@@ -1148,6 +1173,7 @@ def comision_pendiente_detail(request, pk):
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
 
+    # ---------- DELETE ----------
     elif request.method == 'DELETE':
         comision.delete()
         return Response(status=204)
