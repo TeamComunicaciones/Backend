@@ -145,6 +145,22 @@ def _get_client_ip(request):
         ip = request.META.get("REMOTE_ADDR")
     return ip   
 
+def filtrar_por_idpos_o_nombre(queryset, idpos_filtro: str):
+    """
+    Aplica un filtro que intenta machear el valor recibido contra:
+      - Comision.idpos  (código)
+      - Comision.punto_de_venta  (nombre comercial)
+    El match es case-insensitive e igual exacto.
+    """
+    if not idpos_filtro:
+        return queryset
+
+    return queryset.filter(
+        Q(idpos__iexact=idpos_filtro) |
+        Q(punto_de_venta__iexact=idpos_filtro)
+    )
+
+
 @csrf_exempt
 @require_POST
 def transparency_report_view(request):
@@ -960,7 +976,7 @@ def comisiones_pendientes_list(request):
 
     POST - Crea una comisión pendiente manual:
       Campos esperados:
-        - idpos (str)
+        - idpos (str)  -> CÓDIGO DEL PDV (p.ej. 339152)
         - ruta (str)
         - asesor_username (str)  -> username del User
         - mes_pago (YYYY-MM-DD)
@@ -990,10 +1006,15 @@ def comisiones_pendientes_list(request):
                 Q(asesor_identificador__icontains=asesor)
             )
 
-        # 🔎 Filtro por ID POS (parcial)
+        # 🔎 Filtro por ID POS (acepta código exacto o búsqueda parcial)
         idpos = request.GET.get('idpos')
         if idpos:
-            qs = qs.filter(idpos__icontains=idpos)
+            # Si le pasas el código exacto (339152) matchea;
+            # si es cadena parcial/nombre, también gracias a icontains.
+            qs = qs.filter(
+                Q(idpos__iexact=idpos) |  # código exacto
+                Q(idpos__icontains=idpos)  # por si mandas algo parcial
+            )
 
         fecha_inicio = request.GET.get('fecha_inicio')
         fecha_fin = request.GET.get('fecha_fin')
@@ -1007,7 +1028,7 @@ def comisiones_pendientes_list(request):
                     Q(mes_pago__isnull=True, prim_llamada_activacion__range=(fi, ff))
                 )
 
-        # 🔴 CAMBIO IMPORTANTE:
+        # 🔴 IMPORTANTE:
         #  - Comisiones "normales" aún sin pago: pagos__isnull=True
         #  - Comisiones de SALDO PENDIENTE (parciales): las queremos ver aunque tengan pago asociado
         qs = qs.filter(
@@ -1022,15 +1043,17 @@ def comisiones_pendientes_list(request):
         paginator = StandardResultsSetPagination()
         page = paginator.paginate_queryset(qs, request)
         serializer = ComisionPendienteAdminSerializer(page, many=True)
+
+        # 👈 ESTE RETURN ES CLAVE
         return paginator.get_paginated_response(serializer.data)
 
     # ------------------------- POST -------------------------
     # Crear comisión pendiente manual
-    if request.method == 'POST':
+    elif request.method == 'POST':
         data = request.data
         errors = {}
 
-        idpos = data.get('idpos')
+        idpos = data.get('idpos')  # 👈 aquí llega el código PDV, p.ej. "339152"
         ruta = data.get('ruta')
         asesor_username = data.get('asesor_username')
         mes_pago_str = data.get('mes_pago')
@@ -1106,7 +1129,7 @@ def comisiones_pendientes_list(request):
                     if base_comision else mes_pago_date
                 ),
                 min=base_comision.min if base_comision else None,
-                idpos=idpos,
+                idpos=idpos,  # 👈 se guarda tal cual el código que envía el front
                 punto_de_venta=(
                     base_comision.punto_de_venta if base_comision else 'MANUAL'
                 ),
@@ -1183,9 +1206,18 @@ def comision_pendiente_detail(request, pk):
 @admin_permission_required
 def admin_puntos_de_venta_list(request):
     """
-    Devuelve una lista de Puntos de Venta (únicos)
+    Devuelve una lista de Puntos de Venta (código + nombre)
     filtrados por una ruta específica.
-    Usado para el dropdown dependiente en el admin.
+
+    Estructura de respuesta:
+    [
+      {
+        "codigo": "339152",
+        "nombre": "ABARROTES EL PROGRESO",
+        "label": "339152 - ABARROTES EL PROGRESO"
+      },
+      ...
+    ]
     """
     ruta = request.query_params.get('ruta')
     if not ruta:
@@ -1195,16 +1227,35 @@ def admin_puntos_de_venta_list(request):
         puntos = (
             Comision.objects
             .filter(ruta=ruta)
-            .values_list('punto_de_venta', flat=True)
+            .values('idpos', 'punto_de_venta')
             .distinct()
             .order_by('punto_de_venta')
         )
-        return Response(list(puntos), status=status.HTTP_200_OK)
+
+        data = []
+        for p in puntos:
+            codigo = p.get("idpos")
+            nombre = p.get("punto_de_venta") or ""
+
+            if not codigo:
+                # si no hay código, lo saltamos para no contaminar el estándar
+                continue
+
+            label = f"{codigo} - {nombre}".strip(" -")
+
+            data.append({
+                "codigo": codigo,
+                "nombre": nombre,
+                "label": label,
+            })
+
+        return Response(data, status=status.HTTP_200_OK)
     except Exception as e:
         return Response(
             {'detail': f'Error al obtener puntos de venta: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
                 
 @api_view(['GET'])
 def filtros_asesor_view(request):
@@ -1520,21 +1571,34 @@ def consulta_agrupada_pdv_view(request):
     """
     Devuelve las comisiones agrupadas para un IDPOS específico,
     con filtros opcionales por mes y estado, incluyendo la fecha de pago para los grupos pagados.
+
+    Ahora el parámetro `idpos` puede ser:
+      - el código (Comision.idpos)
+      - o el nombre del punto de venta (Comision.punto_de_venta)
     """
     idpos = request.query_params.get('idpos')
     if not idpos:
-        return Response({"error": "El parámetro 'idpos' es obligatorio."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            {"error": "El parámetro 'idpos' es obligatorio."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
 
-    # Construir el queryset base
-    base_queryset = models.Comision.objects.filter(idpos=idpos).exclude(estado='Consolidada')
-    
+    # Construir el queryset base:
+    #  - Buscamos por idpos (código) o por punto_de_venta (nombre)
+    #  - Excluimos 'Consolidada'
+    base_queryset = (
+        models.Comision.objects
+        .exclude(estado='Consolidada')
+    )
+    base_queryset = filtrar_por_idpos_o_nombre(base_queryset, idpos)
+
     # Aplicar filtros opcionales
     mes_filtro = request.query_params.get('mes')
     if mes_filtro:
         try:
             fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
             base_queryset = base_queryset.filter(
-                mes_pago__year=fecha_obj.year, 
+                mes_pago__year=fecha_obj.year,
                 mes_pago__month=fecha_obj.month
             )
         except (ValueError, TypeError):
@@ -1544,26 +1608,34 @@ def consulta_agrupada_pdv_view(request):
     if estado_filtro and estado_filtro != 'Todos':
         base_queryset = base_queryset.filter(estado=estado_filtro)
 
-    # Calcular KPIs sobre el queryset filtrado (sin cambios)
+    # Calcular KPIs sobre el queryset filtrado
     kpis_data = base_queryset.aggregate(
         totalPagado=Sum('comision_final', filter=Q(estado='Pagada'), default=0),
         totalPendiente=Sum('comision_final', filter=Q(estado__in=['Pendiente', 'Acumulada']), default=0)
     )
     kpis_data['totalComisiones'] = (kpis_data.get('totalPagado') or 0) + (kpis_data.get('totalPendiente') or 0)
 
-    # CORRECCIÓN: Agrupar resultados y obtener la fecha de pago más reciente del grupo.
-    grouped_results = base_queryset.values(
-        'mes_pago', 'asesor_identificador', 'producto', 'estado'
-    ).annotate(
-        comision_final_total=Sum('comision_final'),
-        fecha_pago_reciente=Max('pagos__fecha_pago') # Se anota la fecha de pago del grupo
-    ).order_by('-mes_pago', 'asesor_identificador')
+    # Agrupar resultados y obtener la fecha de pago más reciente del grupo.
+    grouped_results = (
+        base_queryset
+        .values('mes_pago', 'asesor_identificador', 'producto', 'estado')
+        .annotate(
+            comision_final_total=Sum('comision_final'),
+            fecha_pago_reciente=Max('pagos__fecha_pago')  # fecha de pago del grupo
+        )
+        .order_by('-mes_pago', 'asesor_identificador')
+    )
 
     # Formatear la salida
     resultados = []
     for item in grouped_results:
-        # Se genera un ID único para el frontend, ya que son registros virtuales
-        unique_id = f"agrupado-{item['estado']}-{item['mes_pago']}-{item['asesor_identificador']}-{item['producto']}"
+        unique_id = (
+            f"agrupado-{item['estado']}-"
+            f"{item['mes_pago']}-"
+            f"{item['asesor_identificador']}-"
+            f"{item['producto']}"
+        )
+
         resultados.append({
             'id': unique_id,
             'asesor_identificador': item['asesor_identificador'],
@@ -1571,15 +1643,16 @@ def consulta_agrupada_pdv_view(request):
             'comision_final': item['comision_final_total'],
             'estado': item['estado'],
             'mes_pago': item['mes_pago'],
-            'fecha_pago': item['fecha_pago_reciente'], # Se usa la fecha anotada
+            'fecha_pago': item['fecha_pago_reciente'],
         })
 
     data = {
         'kpis': kpis_data,
         'results': resultados
     }
-    
+
     return Response(data)
+
 
 
 @api_view(['POST'])
@@ -2094,7 +2167,7 @@ def reporte_asesor_view(request):
                 {"error": "No tienes una ruta asignada en tu perfil."},
                 status=status.HTTP_403_FORBIDDEN
             )
-        
+
         # 2. Query base: por ruta, excluyendo 'Consolidada'
         base_queryset = (
             models.Comision.objects
@@ -2108,21 +2181,23 @@ def reporte_asesor_view(request):
 
         queryset_con_filtros = base_queryset
 
+        # 🔹 Filtro por mes (mes_pago o mes de pago del PagoComision)
         if mes_filtro:
             try:
                 fecha_obj = datetime.strptime(mes_filtro, '%Y-%m')
 
-                # Mes pago de la comisión o mes de la fecha de pago del PagoComision
                 queryset_con_filtros = queryset_con_filtros.filter(
                     Q(mes_pago__year=fecha_obj.year, mes_pago__month=fecha_obj.month) |
                     Q(pagos__fecha_pago__year=fecha_obj.year, pagos__fecha_pago__month=fecha_obj.month)
                 )
-
             except (ValueError, TypeError):
+                # Si el mes viene mal, lo ignoramos silenciosamente
                 pass
-        
+
+        # 🔹 Filtro por IDPOS o nombre del PDV (campo `punto_de_venta`)
+        #    El front puede enviar código o nombre, aquí macheamos ambos.
         if idpos_filtro and idpos_filtro != 'todos':
-            queryset_con_filtros = queryset_con_filtros.filter(idpos=idpos_filtro)
+            queryset_con_filtros = filtrar_por_idpos_o_nombre(queryset_con_filtros, idpos_filtro)
 
         # Si no hay nada tras filtros, respondemos rápido
         if not queryset_con_filtros.exists():
@@ -2299,6 +2374,7 @@ def reporte_asesor_view(request):
             {"error": f"Ha ocurrido un error inesperado: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
     
 @api_view(['GET'])
 @asesor_permission_required(allow_supervisor=True)
