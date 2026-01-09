@@ -3097,7 +3097,7 @@ def calculate_dynamic_total(equipo_sin_iva, kits):
     if not isinstance(equipo_sin_iva, Decimal):
         equipo_sin_iva = Decimal(str(equipo_sin_iva))
     
-    base_iva_excluido = Decimal('1095578')
+    base_iva_excluido = Decimal('1152228')
     valor_sim = Decimal('2000')
     iva_sim = valor_sim * Decimal('0.19')
 
@@ -3249,7 +3249,7 @@ def buscar_precios(request):
             
         # --- PROCESAMIENTO DE DATOS ---
         new_data = []
-        base_iva_excluido = Decimal('1095578')
+        base_iva_excluido = Decimal('1152228')
         TASA_IVA = Decimal('0.19')
         
         for precio_actual in precios_actuales_con_anterior:
@@ -6034,7 +6034,7 @@ def debug_precio_publico(request):
 @api_view(['POST'])
 def translate_prepago(requests):
     if requests.method == 'POST':
-        iva = 1095578  # umbral
+        iva = 1152228  # umbral
 
         # ==== NUEVO: cargar excepciones de IVA para prepago ====
         iva_excepciones = set(
@@ -6220,7 +6220,7 @@ class ListaProductosPrepagoEquipo(APIView):
             df['variation'] = df.apply(calcular_variacion, axis=1)
 
             sim = Decimal('2000')
-            base = Decimal('1095578')
+            base = Decimal('1152228')
             new_data = []
 
             for _, row in df.iterrows():
@@ -6426,7 +6426,7 @@ def lista_productos_prepago(request):
             df_final['variation'] = df_final.apply(calcular_variacion, axis=1)
 
             sim = Decimal('2000')
-            base = Decimal('1095578')
+            base = Decimal('1152228')
             new_data = []
 
             for _, row in df_final.iterrows():
