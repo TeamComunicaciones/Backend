@@ -5753,13 +5753,12 @@ def user_permissions(request):
         token = auth_header.split(' ')[1]
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
 
-        # Usuario por ID (correcto)
         usuario = User.objects.get(id=payload['id'])
 
         if getattr(usuario, 'force_password_change', False):
             return Response({"cambioClave": True})
 
-        # ✅ Estructura que espera tu FRONT (objetos con main)
+        # ✅ Estructura base (IMPORTANTE: incluye subpermisos)
         permisos_dict = {
             'superadmin': usuario.is_superuser,
 
@@ -5769,12 +5768,11 @@ def user_permissions(request):
             'gestion_humana': {'main': False},
             'contabilidad': {'main': False},
 
-            # ✅ Comisiones: ahora guardamos también roles
             'comisiones': {
                 'main': False,
                 'asesor_comisiones': False,
                 'supervisor_comisiones': False,
-                'admin_comisiones': False,
+                'admin_comisiones': False
             },
 
             'soporte': {'main': False},
@@ -5783,41 +5781,83 @@ def user_permissions(request):
             'corresponsal': {'main': False},
             'caja': {'main': False},
 
-            # Si en el front usas "consultas", déjalo creado (opcional)
             'consultas': {
                 'main': False,
                 'consulta_pdv': False,
                 'dashboard_asesor': False,
-                'panel_admin': False,
-            },
+                'panel_admin': False
+            }
         }
 
-        # ✅ Trae solo permisos activos y en true
-        permisos_usuario = models.Permisos_usuarios.objects.filter(
-            user=usuario,
-            tiene_permiso=True,
-            permiso__active=True,
-        ).select_related('permiso')
+        # ✅ Mapa: permiso en DB -> (módulo, clave)
+        # Ajusta aquí si en tu BD los nombres son distintos
+        PERMISSION_MAP = {
+            # Comisiones roles
+            'asesor_comisiones': ('comisiones', 'asesor_comisiones'),
+            'supervisor_comisiones': ('comisiones', 'supervisor_comisiones'),
+            'admin_comisiones': ('comisiones', 'admin_comisiones'),
+
+            # Consultas subpermisos
+            'consulta_pdv': ('consultas', 'consulta_pdv'),
+            'dashboard_asesor': ('consultas', 'dashboard_asesor'),
+            'panel_admin': ('consultas', 'panel_admin'),
+
+            # Módulos main (si en DB los manejas como permiso "administrador", "informes", etc.)
+            'administrador': ('administrador', 'main'),
+            'informes': ('informes', 'main'),
+            'control_interno': ('control_interno', 'main'),
+            'gestion_humana': ('gestion_humana', 'main'),
+            'contabilidad': ('contabilidad', 'main'),
+            'comisiones': ('comisiones', 'main'),
+            'soporte': ('soporte', 'main'),
+            'auditoria': ('auditoria', 'main'),
+            'comercial': ('comercial', 'main'),
+            'corresponsal': ('corresponsal', 'main'),
+            'caja': ('caja', 'main'),
+            'consultas': ('consultas', 'main'),
+        }
+
+        permisos_usuario = models.Permisos_usuarios.objects.filter(user=usuario).select_related('permiso')
 
         for p_usuario in permisos_usuario:
-            permiso_name = (p_usuario.permiso.permiso or '').lower()
+            raw_name = (p_usuario.permiso.permiso or "").strip().lower()
+            tiene = bool(p_usuario.tiene_permiso)
 
-            # 1) Si coincide con un módulo directo (administrador, informes, etc.)
-            if permiso_name in permisos_dict and isinstance(permisos_dict[permiso_name], dict):
-                permisos_dict[permiso_name]['main'] = True
+            # superadmin explícito (si lo manejas en tabla)
+            if raw_name == 'superadmin':
+                permisos_dict['superadmin'] = tiene
                 continue
 
-            # 2) ✅ Mapear roles de comisiones → activar comisiones.main
-            if permiso_name in ['asesor_comisiones', 'supervisor_comisiones', 'admin_comisiones']:
-                permisos_dict['comisiones']['main'] = True
-                permisos_dict['comisiones'][permiso_name] = True
-                continue
+            # ✅ Aplica mapeo si coincide
+            if raw_name in PERMISSION_MAP:
+                modulo, key = PERMISSION_MAP[raw_name]
+                permisos_dict[modulo][key] = tiene
 
-            # 3) (Opcional) mapear subpermisos de consultas si los tienes así en BD
-            if permiso_name in ['consulta_pdv', 'dashboard_asesor', 'panel_admin']:
-                permisos_dict['consultas']['main'] = True
-                permisos_dict['consultas'][permiso_name] = True
-                continue
+                # si prende un subpermiso, puedes prender main del módulo
+                if key != 'main' and tiene:
+                    permisos_dict[modulo]['main'] = True
+
+        # ✅ REGLA DE NEGOCIO: Consultas se deriva de roles de comisiones
+        c = permisos_dict.get('comisiones', {})
+        q = permisos_dict.get('consultas', {})
+
+        es_admin = permisos_dict['superadmin'] or c.get('admin_comisiones', False)
+        es_asesor = c.get('asesor_comisiones', False)
+        es_supervisor = c.get('supervisor_comisiones', False)
+
+        # Asesor o supervisor => consulta_pdv + dashboard_asesor
+        if es_asesor or es_supervisor or es_admin:
+            q['consulta_pdv'] = True or q.get('consulta_pdv', False)
+            q['dashboard_asesor'] = True or q.get('dashboard_asesor', False)
+
+        # Admin => panel_admin
+        if es_admin:
+            q['panel_admin'] = True or q.get('panel_admin', False)
+
+        # main = si tiene cualquiera
+        q['main'] = bool(q.get('consulta_pdv') or q.get('dashboard_asesor') or q.get('panel_admin') or q.get('main'))
+
+        permisos_dict['consultas'] = q
 
         return Response({
             "permisos": permisos_dict,
