@@ -5752,34 +5752,73 @@ def user_permissions(request):
 
         token = auth_header.split(' ')[1]
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-        
-        # --- LÍNEA CORREGIDA ---
-        # Buscamos al usuario por su ID, no por su username
+
+        # Usuario por ID (correcto)
         usuario = User.objects.get(id=payload['id'])
 
         if getattr(usuario, 'force_password_change', False):
             return Response({"cambioClave": True})
 
+        # ✅ Estructura que espera tu FRONT (objetos con main)
         permisos_dict = {
             'superadmin': usuario.is_superuser,
-            'administrador': {'main': False}, 'informes': {'main': False},
-            'control_interno': {'main': False}, 'gestion_humana': {'main': False},
-            'contabilidad': {'main': False}, 'comisiones': {'main': False},
-            'soporte': {'main': False}, 'auditoria': {'main': False},
-            'comercial': {'main': False}, 'corresponsal': {'main': False},
+
+            'administrador': {'main': False},
+            'informes': {'main': False},
+            'control_interno': {'main': False},
+            'gestion_humana': {'main': False},
+            'contabilidad': {'main': False},
+
+            # ✅ Comisiones: ahora guardamos también roles
+            'comisiones': {
+                'main': False,
+                'asesor_comisiones': False,
+                'supervisor_comisiones': False,
+                'admin_comisiones': False,
+            },
+
+            'soporte': {'main': False},
+            'auditoria': {'main': False},
+            'comercial': {'main': False},
+            'corresponsal': {'main': False},
             'caja': {'main': False},
+
+            # Si en el front usas "consultas", déjalo creado (opcional)
+            'consultas': {
+                'main': False,
+                'consulta_pdv': False,
+                'dashboard_asesor': False,
+                'panel_admin': False,
+            },
         }
 
-        permisos_usuario = models.Permisos_usuarios.objects.filter(user=usuario).select_related('permiso')
+        # ✅ Trae solo permisos activos y en true
+        permisos_usuario = models.Permisos_usuarios.objects.filter(
+            user=usuario,
+            tiene_permiso=True,
+            permiso__active=True,
+        ).select_related('permiso')
 
         for p_usuario in permisos_usuario:
-            permiso_name = p_usuario.permiso.permiso.lower()
-            if permiso_name in permisos_dict:
-                if permiso_name == 'superadmin':
-                    permisos_dict[permiso_name] = p_usuario.tiene_permiso
-                else:
-                    permisos_dict[permiso_name]['main'] = p_usuario.tiene_permiso
-        
+            permiso_name = (p_usuario.permiso.permiso or '').lower()
+
+            # 1) Si coincide con un módulo directo (administrador, informes, etc.)
+            if permiso_name in permisos_dict and isinstance(permisos_dict[permiso_name], dict):
+                permisos_dict[permiso_name]['main'] = True
+                continue
+
+            # 2) ✅ Mapear roles de comisiones → activar comisiones.main
+            if permiso_name in ['asesor_comisiones', 'supervisor_comisiones', 'admin_comisiones']:
+                permisos_dict['comisiones']['main'] = True
+                permisos_dict['comisiones'][permiso_name] = True
+                continue
+
+            # 3) (Opcional) mapear subpermisos de consultas si los tienes así en BD
+            if permiso_name in ['consulta_pdv', 'dashboard_asesor', 'panel_admin']:
+                permisos_dict['consultas']['main'] = True
+                permisos_dict['consultas'][permiso_name] = True
+                continue
+
         return Response({
             "permisos": permisos_dict,
             "usuario": usuario.username,
@@ -5794,7 +5833,7 @@ def user_permissions(request):
         return Response({'detail': 'Usuario del token no es válido.'}, status=401)
     except Exception as e:
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
-
+    
 @api_view(['POST'])
 def cambio_clave(request):
     print('d')
