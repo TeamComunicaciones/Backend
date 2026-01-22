@@ -545,14 +545,16 @@ def token_required(view_func):
         
     return wrapper
 
-def asesor_permission_required(view_func=None, *, allow_supervisor=False):
+def asesor_permission_required(view_func=None, *, allow_supervisor=False, allow_admin=False):
     """
     Decorador para endpoints de comisiones.
 
-    - Por defecto (allow_supervisor=False):
-        SOLO usuarios con permiso 'asesor_comisiones' pasan.
-    - Si allow_supervisor=True:
-        pasan usuarios con 'asesor_comisiones' O 'supervisor_comisiones'.
+    - Por defecto:
+        SOLO 'asesor_comisiones'
+    - allow_supervisor=True:
+        'asesor_comisiones' o 'supervisor_comisiones'
+    - allow_admin=True:
+        también deja pasar 'admin_comisiones'
     """
 
     def decorator(inner_view):
@@ -562,42 +564,32 @@ def asesor_permission_required(view_func=None, *, allow_supervisor=False):
                 auth_header = request.headers.get('Authorization')
                 if not auth_header or not auth_header.startswith('Bearer '):
                     raise AuthenticationFailed('Token no proporcionado o con formato incorrecto.')
-                
+
                 token = auth_header.split(' ')[1]
                 payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
-                
-                # 1. Obtenemos el ID del token
+
                 user_id = payload.get('id')
                 if not user_id:
                     raise AuthenticationFailed('El token no contiene un identificador de usuario válido.')
 
-                # 2. Buscamos al usuario por su ID numérico
                 user = User.objects.get(id=user_id)
-
-                # Asignamos el usuario a la request para que la vista lo use
                 request.user = user
 
-                # ---- Validación de permisos ----
                 qs = Permisos_usuarios.objects.filter(
                     user=user,
                     tiene_permiso=True,
                     permiso__active=True,
                 )
 
+                allowed = ['asesor_comisiones']
                 if allow_supervisor:
-                    # Acepta asesor_comisiones o supervisor_comisiones
-                    if not qs.filter(permiso__permiso__in=['asesor_comisiones', 'supervisor_comisiones']).exists():
-                        raise AuthenticationFailed(
-                            'No tienes los permisos necesarios para acceder a este recurso.'
-                        )
-                else:
-                    # SOLO asesor_comisiones
-                    if not qs.filter(permiso__permiso='asesor_comisiones').exists():
-                        raise AuthenticationFailed(
-                            'No tienes los permisos de Asesor necesarios para acceder a este recurso.'
-                        )
+                    allowed.append('supervisor_comisiones')
+                if allow_admin:
+                    allowed.append('admin_comisiones')
 
-                # Si todo está bien, ejecutamos la vista original
+                if not qs.filter(permiso__permiso__in=allowed).exists():
+                    raise AuthenticationFailed('No tienes los permisos necesarios para acceder a este recurso.')
+
                 return inner_view(request, *args, **kwargs)
 
             except (jwt.InvalidTokenError, jwt.ExpiredSignatureError, AuthenticationFailed, User.DoesNotExist) as e:
@@ -607,9 +599,6 @@ def asesor_permission_required(view_func=None, *, allow_supervisor=False):
 
         return wrapper
 
-    # Soporta uso con y sin paréntesis:
-    # @asesor_permission_required
-    # @asesor_permission_required(allow_supervisor=True)
     if view_func is None:
         return decorator
     return decorator(view_func)
@@ -1459,7 +1448,7 @@ from django.db.models import Sum, Q
 # ... y los demás imports que ya usas
 
 @api_view(['GET'])
-@asesor_permission_required(allow_supervisor=True)
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def reporte_comparativa_view(request):
     """
     Genera datos para el gráfico comparativo (mes actual vs anterior).
@@ -1656,7 +1645,7 @@ def consulta_agrupada_pdv_view(request):
 
 
 @api_view(['POST'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def pagar_comisiones_view(request):
     """
     Procesa el pago de comisiones desde el dashboard del asesor.
@@ -1920,7 +1909,7 @@ def consulta_agrupada_pdv_view(request):
     return Response(data)
 
 @api_view(['GET'])
-@asesor_permission_required # Descomenta si usas este decorador
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)# Descomenta si usas este decorador
 def reporte_general_view(request):
     """
     Genera un reporte general de comisiones con filtros dinámicos para el dashboard de administración.
@@ -2010,7 +1999,7 @@ def reporte_general_view(request):
 
 logger = logging.getLogger(__name__)
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def exportar_reporte_excel(request):
     """
     Genera y devuelve un archivo XLSX con el detalle de las comisiones filtradas.
@@ -2106,7 +2095,7 @@ def exportar_reporte_excel(request):
 
 
 @api_view(['GET', 'POST'])
-@asesor_permission_required# ¡Protege esta vista! Solo los admins deben poder cambiar esto.
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)# ¡Protege esta vista! Solo los admins deben poder cambiar esto.
 def fecha_corte_view(request):
     """
     Obtiene o establece el día del mes para la fecha de corte de comisiones.
@@ -2141,7 +2130,7 @@ def fecha_corte_view(request):
 
 
 @api_view(['GET'])
-@asesor_permission_required(allow_supervisor=True)
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def reporte_asesor_view(request):
     """
     Genera el reporte para el asesor.
@@ -2374,10 +2363,75 @@ def reporte_asesor_view(request):
             {"error": f"Ha ocurrido un error inesperado: {str(e)}"},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+@api_view(["GET"])
+@admin_permission_required
+def ultima_carga_comisiones(request):
+    carga = models.ComisionCarga.objects.order_by("-created_at").first()
+    if not carga:
+        return Response({"detail": "No hay cargas registradas."}, status=404)
 
+    return Response({
+        "id": carga.id,
+        "file_name": carga.file_name,
+        "estado": carga.estado,
+        "created_at": carga.created_at,
+        "created_by": carga.created_by.username if carga.created_by else None,
+        "mes_detectado": carga.mes_detectado,
+        "registros_creados": carga.registros_creados,
+        "detalle": carga.detalle,
+    })
+
+
+@api_view(["POST"])
+@admin_permission_required
+def rollback_ultima_carga_comisiones(request):
+    delete_pagos_orphans = bool(request.data.get("delete_pagos_orphans", False))
+
+    # si hay una carga en proceso, no permitir rollback
+    ultima = models.ComisionCarga.objects.order_by("-created_at").first()
+    if ultima and ultima.estado == "processing":
+        return Response({"detail": "Hay una carga en proceso. No se puede revertir ahora."}, status=409)
+
+    carga = models.ComisionCarga.objects.filter(estado="success").order_by("-created_at").first()
+    if not carga:
+        return Response({"detail": "No hay cargas exitosas para revertir."}, status=404)
+
+    with transaction.atomic():
+        # Guardamos pagos relacionados ANTES de borrar comisiones
+        pagos_ids = list(
+            models.Comision.objects
+            .filter(carga=carga, pagos__isnull=False)
+            .values_list("pagos_id", flat=True)
+            .distinct()
+        )
+
+        total_comisiones = models.Comision.objects.filter(carga=carga).count()
+        models.Comision.objects.filter(carga=carga).delete()
+
+        pagos_deleted = 0
+        if delete_pagos_orphans and pagos_ids:
+            qs = (models.PagoComision.objects
+                  .filter(id__in=pagos_ids)
+                  .annotate(n=Count("comisiones_pagadas"))
+                  .filter(n=0))
+            pagos_deleted = qs.count()
+            qs.delete()
+
+        carga.estado = "rolled_back"
+        carga.rolled_back_at = timezone.now()
+        carga.rolled_back_by = request.user
+        carga.detalle = (carga.detalle or "") + f"\nRollback por {request.user.username}. Comisiones borradas: {total_comisiones}. Pagos huérfanos borrados: {pagos_deleted}."
+        carga.save(update_fields=["estado", "rolled_back_at", "rolled_back_by", "detalle"])
+
+    return Response({
+        "detail": "Rollback ejecutado correctamente.",
+        "carga_id": carga.id,
+        "comisiones_borradas": total_comisiones,
+        "pagos_huerfanos_borrados": pagos_deleted,
+    })
     
 @api_view(['GET'])
-@asesor_permission_required(allow_supervisor=True)
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def filtros_reporte_view(request):
     """
     Devuelve los filtros para el dashboard de comisiones.
@@ -2466,7 +2520,7 @@ def filtros_reporte_view(request):
     return Response(data)
 
 @api_view(['GET'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def pdv_por_ruta_view(request):
     """Devuelve los puntos de venta que existen para una ruta específica."""
     ruta_seleccionada = request.query_params.get('ruta', None)
@@ -2595,7 +2649,7 @@ def formulas_prices(request, id=None):
 
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def carga_comisiones_view(request):
     """
     Gestiona la subida y validación de archivos Excel para comisiones.
@@ -3647,7 +3701,7 @@ def usuario_detail(request, username):
 
         
 @api_view(['POST'])
-@asesor_permission_required
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 @parser_classes([MultiPartParser, FormParser])
 def subir_comprobante_view(request):
     """
@@ -3681,7 +3735,7 @@ def subir_comprobante_view(request):
 
 
 @api_view(['POST'])
-@asesor_permission_required(allow_supervisor=True)
+@asesor_permission_required(allow_supervisor=True, allow_admin=True)
 def get_comprobante_view(request):
     """
     Recibe { "url": "nombre_de_archivo.ext" } y devuelve la imagen en base64
