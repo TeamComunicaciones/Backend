@@ -120,6 +120,8 @@ urlpatterns = [
     path('admin/usuarios/activar/', views.toggle_user_active, name='toggle_user_active'),
     path('admin/cajeros/rol-caja/', views.toggle_cajero_role, name='toggle_cajero_role'),
     path('admin/usuarios/<str:username>/', views.usuario_detail, name='usuario_detail'),
+    path("admin/comisiones/ultima-carga/", views.ultima_carga_comisiones),
+    path("admin/comisiones/rollback-ultima-carga/", views.rollback_ultima_carga_comisiones),
 
     path(
         'admin/comisiones-pendientes/',

@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth.hashers import make_password, check_password
 from django.contrib.auth.models import User
 from django.utils import timezone
+from django.conf import settings
 
 class Perfil(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -244,32 +245,93 @@ class Configuracion(models.Model):
     def __str__(self):
         return f"{self.clave}: {self.valor}"
     
-class Comision(models.Model):
-    asesor = models.ForeignKey(
+class ComisionCarga(models.Model):  
+    ESTADO_CHOICES = [
+        ("processing", "Procesando"),
+        ("success", "Exitosa"),
+        ("error", "Error"),
+        ("rolled_back", "Revertida"),
+    ]
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.ForeignKey(
         User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="cargas_comisiones",
+    )
+
+    file_name = models.CharField(max_length=255, blank=True, null=True)
+    mes_detectado = models.DateField(null=True, blank=True)
+
+    estado = models.CharField(
+        max_length=20,
+        choices=ESTADO_CHOICES,
+        default="processing",
+        db_index=True,
+    )
+
+    registros_creados = models.PositiveIntegerField(default=0)
+    detalle = models.TextField(blank=True, null=True)
+
+    rolled_back_at = models.DateTimeField(null=True, blank=True)
+    rolled_back_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rollbacks_comisiones",
+    )
+
+    def __str__(self):
+        return f"Carga #{self.id} - {self.file_name or 'sin_nombre'} - {self.estado}"
+
+class Comision(models.Model):
+    carga = models.ForeignKey(
+        "ComisionCarga",                 # <-- string para evitar problemas de orden
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="comisiones",
+        db_index=True
+    )
+
+    asesor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,        # <-- recomendado
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='comisiones',
         help_text="Vínculo al usuario de Django si se encuentra una coincidencia."
     )
+
     asesor_identificador = models.CharField(
-        max_length=250, 
+        max_length=250,
         db_index=True,
         help_text="Nombre del asesor, tal como viene en el archivo Excel."
     )
+
     iccid = models.CharField(max_length=22, db_index=True)
     distribuidor = models.CharField(max_length=150, blank=True, null=True)
-    producto = models.CharField(max_length=100, null=True, blank=True)  
+    producto = models.CharField(max_length=100, null=True, blank=True)
     co_id = models.CharField(max_length=50, blank=True, null=True)
     prim_llamada_activacion = models.DateField(null=True, blank=True)
     min = models.CharField(max_length=50, blank=True, null=True)
     idpos = models.CharField(max_length=50, db_index=True)
     punto_de_venta = models.CharField(max_length=200)
+
     ruta = models.CharField(max_length=100, blank=True, null=True)
-    comision_final = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    comision_final = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     pago = models.CharField(max_length=100, blank=True, null=True)
-    pagos = models.ForeignKey(PagoComision, on_delete=models.SET_NULL, null=True, blank=True, related_name='comisiones_pagadas')
+
+    pagos = models.ForeignKey(
+        "PagoComision",                  # <-- string por si PagoComision está debajo
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='comisiones_pagadas'
+    )
 
     mes_liquidacion = models.DateField(null=True, blank=True)
     mes_pago = models.DateField(null=True, blank=True)
@@ -282,9 +344,11 @@ class Comision(models.Model):
         ('Vencida', 'Vencida'),
     ]
     estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='Pendiente', db_index=True)
+
+    # Este campo ya no es “tan necesario” porque la carga tiene created_at,
+    # pero lo puedes dejar si te sirve para auditoría rápida.
     fecha_carga = models.DateTimeField(auto_now_add=True)
 
-    # 🔴 NUEVO:
     observacion = models.TextField(blank=True, null=True)
 
     def __str__(self):
@@ -300,6 +364,7 @@ class Comision(models.Model):
 # Nombres EXACTOS como están en la tabla Permisos.permiso
 PERMISO_ASESOR_COMISIONES = "asesor_comisiones"
 PERMISO_SUPERVISOR_COMISIONES = "supervisor_comisiones"
+PERMISO_ADMIN_COMISIONES = "admin_comisiones"
 
 
 def user_tiene_permiso_comisiones(user, permiso_name: str) -> bool:
@@ -318,12 +383,32 @@ def user_tiene_permiso_comisiones(user, permiso_name: str) -> bool:
     ).exists()
 
 
+def user_tiene_algun_permiso_comisiones(user, permiso_names: list[str]) -> bool:
+    """
+    True si el usuario tiene al menos uno de los permisos indicados.
+    """
+    if not user or not user.is_authenticated:
+        return False
+
+    return Permisos_usuarios.objects.filter(
+        user=user,
+        permiso__permiso__in=permiso_names,
+        permiso__active=True,
+        tiene_permiso=True
+    ).exists()
+
+
 def user_es_asesor_comisiones(user) -> bool:
     return user_tiene_permiso_comisiones(user, PERMISO_ASESOR_COMISIONES)
 
 
 def user_es_supervisor_comisiones(user) -> bool:
     return user_tiene_permiso_comisiones(user, PERMISO_SUPERVISOR_COMISIONES)
+
+
+def user_es_admin_comisiones(user) -> bool:
+    return user_tiene_permiso_comisiones(user, PERMISO_ADMIN_COMISIONES)
+
 
 class RutaAsignada(models.Model):
     user = models.ForeignKey(
@@ -400,3 +485,4 @@ class TransparencyReport(models.Model):
 
     def __str__(self):
         return f"{self.get_report_type_display()} - {self.created_at:%Y-%m-%d %H:%M}"
+    
