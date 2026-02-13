@@ -84,6 +84,7 @@ urlpatterns = [
     path('sales-report/upload/', views.upload_sales_report, name='upload_sales_report'),
     path('sales-report/dashboard/', views.get_sales_dashboard_data, name='get_sales_dashboard_data'),
 
+    path("iva-excepciones", views.iva_excepciones, name="iva_excepciones"),
     path('api/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
 

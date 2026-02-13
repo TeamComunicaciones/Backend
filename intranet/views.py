@@ -137,6 +137,15 @@ from rest_framework.views import APIView
 
 logger = logging.getLogger(__name__)
 
+def norm_prod(s) -> str:
+    """
+    Normaliza strings para comparación (case/espacios).
+    NO se usa para mostrar, solo para comparar/deduplicar.
+    """
+    if s is None:
+        return ""
+    return " ".join(str(s).strip().upper().split())
+
 def _get_client_ip(request):
     x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if x_forwarded_for:
@@ -3202,6 +3211,33 @@ def apply_iva_kit_rules(equipo_sin_iva, nombre_lista, kits_list, base_iva_exclui
     return iva_equipo, kits_modificados
 
 
+# ===== Helpers locales (no dependes de otros archivos) =====
+
+def _to_dec(v, default=Decimal("0")):
+    try:
+        if v is None:
+            return default
+        return Decimal(str(v))
+    except Exception:
+        return default
+
+def _zero_out_iva_kits_if_exento(kits_list):
+    """
+    Si el producto es EXENTO, ponemos en 0 los kits que corresponden al IVA del kit.
+    Ajusta aquí si tienes más nombres.
+    """
+    if not kits_list:
+        return []
+    out = []
+    for k in kits_list:
+        kk = dict(k)
+        nombre = (kk.get("nombre") or "").lower()
+        if "kit premium" in nombre or "kit sub" in nombre:
+            kk["valor"] = 0.0
+        out.append(kk)
+    return out
+
+
 @api_view(['POST'])
 # @token_required # Descomenta si usas este decorador
 def buscar_precios(request):
@@ -3219,6 +3255,13 @@ def buscar_precios(request):
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
+        # --- NUEVO: cargar excepciones de IVA (EXENTOS) ---
+        # Ojo: esto asume que "excepción" significa EXENTO (IVA=0) como tú lo necesitas.
+        iva_exentos_set = set(
+            normalize_string(p)
+            for p in models.IvaExcepcion.objects.filter(tipo='prepago').values_list('producto', flat=True)
+        )
+
         # --- SECCIÓN DE CONSULTAS A LA BASE DE DATOS (SIN CAMBIOS) ---
         productos_qs = models.Traducciones.objects.filter(active=True)
         if marcas_seleccionadas:
@@ -3227,7 +3270,7 @@ def buscar_precios(request):
             productos_qs = productos_qs.filter(Q(equipo__icontains=referencia) | Q(stok__icontains=referencia))
 
         mapa_traducciones = {normalize_string(p.stok): p.equipo for p in productos_qs}
-        
+
         if carga_id_actual == 'todas':
             latest_price_ids_subquery = (
                 models.Lista_precio.objects
@@ -3246,23 +3289,23 @@ def buscar_precios(request):
                     carga_actual = models.Carga.objects.get(id=carga_id_actual)
                 except models.Carga.DoesNotExist:
                     return Response({'error': 'La carga seleccionada no existe.'}, status=404)
-            
+
             if not carga_actual:
                 return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
-            
+
             precios_actuales_qs = models.Lista_precio.objects.filter(
                 carga=carga_actual,
                 nombre__in=listas_precios_nombres
             ).select_related('carga')
             fecha_actual_str = carga_actual.fecha_carga.strftime('%d de %B de %Y')
-            
+
         productos_lp_raw = precios_actuales_qs.values_list('producto', flat=True).distinct()
         producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
-        
+
         if not stoks_encontrados_lp:
             return Response({'data': [], 'fecha_actual': fecha_actual_str})
-            
+
         precios_actuales_qs = precios_actuales_qs.filter(producto__in=stoks_encontrados_lp)
 
         subquery_precio_anterior = models.Lista_precio.objects.filter(
@@ -3280,11 +3323,11 @@ def buscar_precios(request):
         mapa_precios_anteriores = {p.id: p for p in precios_anteriores_encontrados}
 
         all_cargas_ids = models.Lista_precio.objects.filter(producto__in=stoks_encontrados_lp).values_list('carga_id', flat=True).distinct()
-        
+
         all_kits_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre__icontains='Kit').exclude(nombre__icontains='Descuento Kit')
         all_costos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='Costo')
         all_descuentos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='descuento')
-        
+
         mapa_kits = defaultdict(list)
         mapa_costos = {}
         mapa_descuentos = {}
@@ -3292,7 +3335,7 @@ def buscar_precios(request):
         for kit in all_kits_data:
             key = (normalize_string(kit.producto), kit.carga_id)
             mapa_kits[key].append({'nombre': kit.nombre, 'valor': float(kit.valor)})
-        
+
         for costo in all_costos_data:
             key = (normalize_string(costo.producto), costo.carga_id)
             mapa_costos[key] = costo.valor
@@ -3300,29 +3343,43 @@ def buscar_precios(request):
         for descuento in all_descuentos_data:
             key = (normalize_string(descuento.producto), descuento.carga_id)
             mapa_descuentos[key] = descuento.valor
-            
+
         # --- PROCESAMIENTO DE DATOS ---
         new_data = []
         base_iva_excluido = Decimal('1152228')
         TASA_IVA = Decimal('0.19')
-        
+
         for precio_actual in precios_actuales_con_anterior:
             prod_raw = precio_actual.producto
             prod_lower = normalize_string(prod_raw)
             nombre_lista = precio_actual.nombre
             carga_id = precio_actual.carga_id
-            
+
+            # NUEVO: si está en excepciones => EXENTO (IVA=0)
+            exento_iva = prod_lower in iva_exentos_set
+
             equipo_sin_iva_actual = precio_actual.valor
             kits_actuales_raw = mapa_kits.get((prod_lower, carga_id), [])
-            
-            # Aplicar reglas al precio actual (necesario para la visualización y el cálculo de variación)
-            iva_equipo_actual, kits_data_to_send = apply_iva_kit_rules(equipo_sin_iva_actual, nombre_lista, kits_actuales_raw, base_iva_excluido, TASA_IVA)
-            
+
+            # Calcula IVA+Kits con tu función existente
+            iva_equipo_actual, kits_data_to_send = apply_iva_kit_rules(
+                equipo_sin_iva_actual,
+                nombre_lista,
+                kits_actuales_raw,
+                base_iva_excluido,
+                TASA_IVA
+            )
+
+            # ===== NUEVO: si es EXENTO, fuerza IVA = 0 y kits IVA = 0 =====
+            if exento_iva:
+                iva_equipo_actual = Decimal('0')
+                kits_data_to_send = _zero_out_iva_kits_if_exento(kits_data_to_send)
+
             valor_anterior_bruto = None
             kits_anteriores_to_send = []
             carga_id_anterior = None
-            iva_equipo_anterior = Decimal('0') # Inicializar IVA anterior
-            
+            iva_equipo_anterior = Decimal('0')  # Inicializar IVA anterior
+
             precio_anterior_obj = mapa_precios_anteriores.get(precio_actual.id_precio_anterior)
 
             if precio_anterior_obj:
@@ -3330,34 +3387,36 @@ def buscar_precios(request):
                 valor_anterior_bruto = precio_anterior_obj.valor
                 kits_anteriores_raw = mapa_kits.get((prod_lower, carga_id_anterior), [])
                 kits_anteriores_to_send = kits_anteriores_raw
-                # Se calcula el IVA del equipo anterior para una comparación justa
-                iva_equipo_anterior, _ = apply_iva_kit_rules(valor_anterior_bruto, nombre_lista, kits_anteriores_raw, base_iva_excluido, TASA_IVA)
-            
-            # --- ZONA DE MODIFICACIÓN ---
-            # La variación se calcula comparando el precio del equipo + su IVA respectivo.
+
+                iva_equipo_anterior, _kits_tmp = apply_iva_kit_rules(
+                    valor_anterior_bruto,
+                    nombre_lista,
+                    kits_anteriores_raw,
+                    base_iva_excluido,
+                    TASA_IVA
+                )
+
+                # ===== NUEVO: mismo override en el anterior =====
+                if exento_iva:
+                    iva_equipo_anterior = Decimal('0')
+
+            # --- ZONA DE MODIFICACIÓN (igual pero usando IVA ya corregido) ---
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
-            
+
             if valor_anterior_bruto is not None:
-                # 1. Se define el total a comparar: Precio Base del Equipo + IVA del Equipo
                 total_comparable_actual = equipo_sin_iva_actual + iva_equipo_actual
                 total_comparable_anterior = valor_anterior_bruto + iva_equipo_anterior
-                
+
                 if total_comparable_anterior > 0:
-                    # 2. CÁLCULO DEL DIFERENCIAL
                     diferencial = total_comparable_actual - total_comparable_anterior
-                    
                     indicador = 'up' if diferencial > 0 else 'down' if diferencial < 0 else 'neutral'
-                    
-                    # 3. CÁLCULO DEL PORCENTAJE
                     porcentaje = (diferencial / total_comparable_anterior) * 100
-                    
+
                     variacion = {
-                        'indicador': indicador, 
-                        'diferencial': float(round(diferencial, 0)), # Redondear al entero más cercano
-                        'porcentaje': float(round(porcentaje, 0)) # Redondear al entero más cercano (ej: 12.79 -> 13)
+                        'indicador': indicador,
+                        'diferencial': float(round(diferencial, 0)),
+                        'porcentaje': float(round(porcentaje, 0))
                     }
-            
-            # --- FIN DE LA ZONA DE MODIFICACIÓN ---
 
             if filtro_variacion and variacion['indicador'] != filtro_variacion:
                 continue
@@ -3365,8 +3424,15 @@ def buscar_precios(request):
             es_promo = Decimal(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))) > 0
             if filtro_promo and not es_promo:
                 continue
-            
-            total_display = equipo_sin_iva_actual + iva_equipo_actual + Decimal('2000') + (Decimal('2000') * TASA_IVA) + sum(Decimal(str(k.get('valor', '0'))) for k in kits_data_to_send)
+
+            # Total display con IVA ya corregido y kits ya corregidos
+            total_display = (
+                equipo_sin_iva_actual
+                + iva_equipo_actual
+                + Decimal('2000')
+                + (Decimal('2000') * TASA_IVA)
+                + sum(Decimal(str(k.get('valor', '0'))) for k in kits_data_to_send)
+            )
 
             new_data.append({
                 'equipo': prod_raw,
@@ -3377,8 +3443,8 @@ def buscar_precios(request):
                 'IVA equipo': float(iva_equipo_actual),
                 'kits': kits_data_to_send,
                 'indicador': variacion['indicador'],
-                'diferencial': variacion['diferencial'], # <-- Este valor ahora será el correcto
-                'porcentaje': variacion['porcentaje'], # <-- Y este también
+                'diferencial': variacion['diferencial'],
+                'porcentaje': variacion['porcentaje'],
                 'costo': float(mapa_costos.get((prod_lower, carga_id), Decimal('0'))),
                 'descuento': float(mapa_descuentos.get((prod_lower, carga_id), Decimal('0'))),
                 'total_kit_calculado': float(total_display),
@@ -3390,12 +3456,10 @@ def buscar_precios(request):
             })
 
         return Response({'data': new_data, 'fecha_actual': fecha_actual_str})
+
     except Exception as e:
-        # Manejo de errores básico
         print(f"ERROR en /buscar_precios: {str(e)}")
         return Response({'detail': f'Error interno: {str(e)}'}, status=500)
-
-
 
 
     
@@ -5317,79 +5381,146 @@ def excel_precios(request):
     
     return Response({'excel':data})
 
-@api_view(['POST'])
+@api_view(["POST"])
 def guardar_precios(request):
-    cabecera = request.data.get('cabecera', [])
-    items = request.data.get('items', [])
-    iva_excepciones = request.data.get('iva_excepciones', [])  # NUEVO
+    cabecera = request.data.get("cabecera", [])
+    items = request.data.get("items", [])
 
-    if not items:
-        return Response({'error': 'No hay items para guardar.'}, status=400)
+    # Importante: solo actualizamos excepciones si el front las manda.
+    iva_excepciones_provided = "iva_excepciones" in request.data
+    iva_excepciones = request.data.get("iva_excepciones", [])
 
-    nueva_carga = models.Carga.objects.create()
-    
+    if not isinstance(items, list) or len(items) == 0:
+        return Response({"error": "No hay items para guardar."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not isinstance(cabecera, list) or len(cabecera) == 0:
+        return Response({"error": "Cabecera inválida."}, status=status.HTTP_400_BAD_REQUEST)
+
+    # header_map: text -> índice
+    try:
+        header_map = {h["text"]: i for i, h in enumerate(cabecera) if isinstance(h, dict) and "text" in h}
+    except Exception:
+        return Response({"error": "Formato de cabecera inválido."}, status=status.HTTP_400_BAD_REQUEST)
+
+    product_name_index = header_map.get("Equipo")
+    if product_name_index is None:
+        return Response({"error": "No se encontró la columna 'Equipo' en la cabecera."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
     lista_de_precios_para_crear = []
-    
-    # Creamos un diccionario para mapear los nombres de la cabecera a sus índices
-    header_map = {item['text']: i for i, item in enumerate(cabecera)}
 
-    # Identificamos el índice de la columna del producto
-    product_name_index = header_map.get('Equipo')
+    with transaction.atomic():
+        nueva_carga = models.Carga.objects.create()
 
-    for precio_row in items:
-        # Extraemos el nombre del producto de su columna correcta
-        if product_name_index is not None and product_name_index < len(precio_row):
+        for precio_row in items:
+            if not isinstance(precio_row, list):
+                continue
+
+            if product_name_index >= len(precio_row):
+                continue
+
             producto = precio_row[product_name_index]
-        else:
-            # Si no se encuentra el nombre del producto, omitimos esta fila
-            continue
+            if producto is None or str(producto).strip() == "":
+                continue
 
-        # Iteramos sobre todos los campos de la cabecera, excepto el del producto
-        for nombre_campo, index in header_map.items():
-            if nombre_campo == 'Equipo':
-                continue  # Omitimos la columna del producto
+            producto_txt = str(producto).strip()
 
-            if index < len(precio_row):
-                valor_raw = precio_row[index]
-                
-                # Validamos que el valor sea un número antes de intentar guardarlo
-                if valor_raw is not None:
-                    try:
-                        # Limpiamos el valor de comas (,) y lo convertimos a un decimal
-                        valor = decimal.Decimal(str(valor_raw).replace(',', ''))
-                    except (decimal.InvalidOperation, ValueError):
-                        # Si la conversión falla, mostramos un mensaje en la consola y saltamos este registro
-                        print(
-                            f"Omitiendo valor inválido '{valor_raw}' "
-                            f"para el producto '{producto}' en el campo '{nombre_campo}'"
-                        )
-                        continue
-                        
-                    lista_de_precios_para_crear.append(
-                        models.Lista_precio(
-                            producto=producto,
-                            nombre=nombre_campo,
-                            valor=valor,
-                            carga=nueva_carga
-                        )
+            for nombre_campo, idx in header_map.items():
+                if nombre_campo == "Equipo":
+                    continue
+
+                if idx >= len(precio_row):
+                    continue
+
+                valor_raw = precio_row[idx]
+                if valor_raw is None or str(valor_raw).strip() == "":
+                    continue
+
+                try:
+                    # Limpia comas y convierte a Decimal
+                    valor = decimal.Decimal(str(valor_raw).replace(",", ""))
+                except (decimal.InvalidOperation, ValueError):
+                    # si llega texto raro, saltamos ese campo (no tumba toda la carga)
+                    continue
+
+                lista_de_precios_para_crear.append(
+                    models.Lista_precio(
+                        producto=producto_txt,
+                        nombre=nombre_campo,
+                        valor=valor,
+                        carga=nueva_carga,
                     )
-    
-    if lista_de_precios_para_crear:
-        models.Lista_precio.objects.bulk_create(lista_de_precios_para_crear)
+                )
 
-    # ==== NUEVO: guardar excepciones de IVA para prepago ====
-    if isinstance(iva_excepciones, list):
-        # Limpiamos vacíos / None
-        iva_excepciones_limpias = [p for p in iva_excepciones if p]
+        if lista_de_precios_para_crear:
+            models.Lista_precio.objects.bulk_create(lista_de_precios_para_crear)
 
-        # Para prepago, pisamos las excepciones anteriores
-        models.IvaExcepcion.objects.filter(tipo='prepago').delete()
-        models.IvaExcepcion.objects.bulk_create([
-            models.IvaExcepcion(producto=p, tipo='prepago')
-            for p in iva_excepciones_limpias
-        ])
+        # ==== IVA EXCEPCIONES (solo si viene en el request) ====
+        if iva_excepciones_provided:
+            if not isinstance(iva_excepciones, list):
+                return Response({"error": "iva_excepciones debe ser una lista."},
+                                status=status.HTTP_400_BAD_REQUEST)
 
-    return Response({'data': 'Datos guardados exitosamente'})
+            # Deduplicar por nombre normalizado para evitar choques en unique=True
+            # Conservando el primer "original" que llegue.
+            dedup = {}
+            for p in iva_excepciones:
+                if not p:
+                    continue
+                original = str(p).strip()
+                if not original:
+                    continue
+                key = norm_prod(original)
+                if key and key not in dedup:
+                    dedup[key] = original
+
+            # Para prepago: pisar lista completa (tu intención original)
+            models.IvaExcepcion.objects.filter(tipo="prepago").delete()
+            if dedup:
+                models.IvaExcepcion.objects.bulk_create([
+                    models.IvaExcepcion(producto=original, tipo="prepago")
+                    for original in dedup.values()
+                ])
+
+    return Response({"data": "Datos guardados exitosamente"}, status=status.HTTP_200_OK)
+
+@api_view(["GET", "POST"])
+def iva_excepciones(request):
+    tipo = request.query_params.get("tipo", None) if request.method == "GET" else request.data.get("tipo", None)
+    tipo = tipo or "prepago"
+
+    if request.method == "GET":
+        productos = list(
+            models.IvaExcepcion.objects.filter(tipo=tipo).values_list("producto", flat=True)
+        )
+        return Response({"tipo": tipo, "productos": productos}, status=status.HTTP_200_OK)
+
+    # POST
+    productos = request.data.get("productos", [])
+    if not isinstance(productos, list):
+        return Response({"error": "productos debe ser una lista"}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Limpia + dedup por normalizado (pero guarda el original “bonito”)
+    dedup = {}
+    for p in productos:
+        if not p:
+            continue
+        original = str(p).strip()
+        if not original:
+            continue
+        key = norm_prod(original)
+        if key and key not in dedup:
+            dedup[key] = original
+
+    with transaction.atomic():
+        models.IvaExcepcion.objects.filter(tipo=tipo).delete()
+        if dedup:
+            models.IvaExcepcion.objects.bulk_create([
+                models.IvaExcepcion(producto=original, tipo=tipo)
+                for original in dedup.values()
+            ])
+
+    return Response({"ok": True, "tipo": tipo, "count": len(dedup)}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -6164,170 +6295,210 @@ def debug_precio_publico(request):
     except Exception as e:
         return JsonResponse({"ERROR": str(e)})
 
-@api_view(['POST'])
-def translate_prepago(requests):
-    if requests.method == 'POST':
-        iva = 1152228  # umbral
+@api_view(["POST"])
+def translate_prepago(request):
+    iva = 1152228  # umbral
 
-        # ==== NUEVO: cargar excepciones de IVA para prepago ====
-        iva_excepciones = set(
-            models.IvaExcepcion.objects.filter(tipo='prepago').values_list('producto', flat=True)
+    # Excepciones desde BD
+    iva_excepciones_norm = set(
+        norm_prod(p) for p in
+        models.IvaExcepcion.objects.filter(tipo="prepago").values_list("producto", flat=True)
+    )
+
+    # Traducciones
+    translates_qs = models.Traducciones.objects.filter(tipo="prepago").values(
+        "equipo", "stok", "iva", "active", "tipo"
+    )
+    df_translates = pd.DataFrame(list(translates_qs))
+    if df_translates.empty:
+        # Si no hay traducciones, todos serán "no encontrados"
+        return Response({"validate": False, "data": [], "crediminuto": [], "cabecera": []},
+                        status=status.HTTP_200_OK)
+
+    # Lista negra
+    black_list = set(models.Lista_negra.objects.all().values_list("equipo", flat=True))
+
+    data = request.data
+    df_equipos = pd.DataFrame(data)
+
+    # Validación mínima de columnas esperadas (4 columnas)
+    if df_equipos.shape[1] < 4:
+        return Response(
+            {"error": "Formato inválido. Se esperan 4 columnas: equipo, valor, descuento, costo."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
-        translates = models.Traducciones.objects.filter(tipo='prepago').values(
-            'equipo', 'stok', 'iva', 'active', 'tipo'
+    # Filtra blacklist usando columna 0 (equipo original)
+    df_equipos = df_equipos[~df_equipos[0].isin(black_list)].copy()
+    df_equipos.columns = ["equipo", "valor", "descuento", "costo"]
+
+    # Limpieza numérica para que comparaciones y eval no fallen
+    df_equipos["valor"] = pd.to_numeric(df_equipos["valor"], errors="coerce").fillna(0)
+    df_equipos["descuento"] = pd.to_numeric(df_equipos["descuento"], errors="coerce").fillna(0)
+    df_equipos["costo"] = pd.to_numeric(df_equipos["costo"], errors="coerce").fillna(0)
+
+    precios = list(models.Formula.objects.all().order_by("id"))
+
+    # Variables por price
+    all_variables_prices = list(models.Variables_prices.objects.all().values())
+    variables_by_price = {}
+    for var in all_variables_prices:
+        price_id = var["price_id"]
+        variables_by_price.setdefault(price_id, {})
+        variables_by_price[price_id][var["name"]] = " ".join(str(var["formula"]).split()) if var["formula"] else ""
+
+    equipos_origen = df_equipos["equipo"]
+    equipos_translate = df_translates["equipo"]
+    equipos_no_encontrados = equipos_origen[~equipos_origen.isin(equipos_translate)]
+
+    if len(equipos_no_encontrados) > 0:
+        return Response(
+            {"validate": False, "data": equipos_no_encontrados.to_list(), "crediminuto": [], "cabecera": []},
+            status=status.HTTP_200_OK,
         )
-        df_translates = pd.DataFrame(translates)
-        
-        black_list = models.Lista_negra.objects.all().values_list('equipo', flat=True)
-        
-        data = requests.data
-        df_equipos = pd.DataFrame(data)
-        df_equipos = df_equipos[~df_equipos[0].isin(black_list)]
-        df_equipos.columns = ['equipo', 'valor', 'descuento', 'costo']
-        
-        precios = models.Formula.objects.all().order_by('id')
-        
-        all_variables_prices = models.Variables_prices.objects.all().values()
-        variables_by_price = {}
-        for var in all_variables_prices:
-            price_id = var['price_id']
-            if price_id not in variables_by_price:
-                variables_by_price[price_id] = {}
-            variables_by_price[price_id][var['name']] = ' '.join(var['formula'].split())
 
-        equipos_origen = df_equipos['equipo']
-        equipos_translate = df_translates['equipo']
-        equipos_no_encontrados = equipos_origen[~equipos_origen.isin(equipos_translate)]
+    # Merge y preparación
+    nuevo_df = df_equipos.merge(df_translates, on="equipo", how="left").drop_duplicates()
 
-        if len(equipos_no_encontrados) > 0:
-            validate = False
-            data_response = equipos_no_encontrados.to_list()
-            cabecera = []
-        else:
-            validate = True
-            nuevo_df = df_equipos.merge(df_translates, on='equipo', how='left')
-            nuevo_df = nuevo_df.drop_duplicates()
-            
-            data_response = []
-            cabecera = [{'text': 'Equipo', 'value': '0'}]
-            
-            contador = 1
-            for precio in precios:
-                cabecera.append({'text': precio.nombre, 'value': str(contador)})
-                contador += 1
-                if 'Precio Fintech' in precio.nombre:
-                    cabecera.append({'text': 'Kit Fintech', 'value': str(contador)})
-                    contador += 1
-                elif 'Precio Addi' in precio.nombre:
-                    cabecera.append({'text': 'Kit Addi', 'value': str(contador)})
-                    contador += 1
-                elif 'Precio premium' in precio.nombre:
-                    cabecera.append({'text': 'Kit Premium', 'value': str(contador)})
-                    contador += 1
-                elif 'Precio sub' in precio.nombre:
-                    cabecera.append({'text': 'Kit Sub', 'value': str(contador)})
-                    contador += 1
-                elif 'Precio Adelantos Valle' in precio.nombre:
-                    cabecera.append({'text': 'Kit Valle', 'value': str(contador)})
-                    contador += 1
-            
-            cabecera.append({'text': 'descuento', 'value': str(contador)})
-            
-            lista_produtos = set()
-            formula_publico_obj = models.Formula.objects.filter(nombre='Precio publico').first()
-            formula2 = ' '.join(ast.literal_eval(formula_publico_obj.formula)) if formula_publico_obj else ''
+    data_response = []
+    cabecera = [{"text": "Equipo", "value": "0"}]
 
-            for _, row in nuevo_df.iterrows():
-                # row['stok'] es el nombre final del producto
-                if row['stok'] in lista_produtos:
-                    continue
-                lista_produtos.add(row['stok'])
+    contador = 1
+    for precio in precios:
+        cabecera.append({"text": precio.nombre, "value": str(contador)})
+        contador += 1
+        if "Precio Fintech" in precio.nombre:
+            cabecera.append({"text": "Kit Fintech", "value": str(contador)})
+            contador += 1
+        elif "Precio Addi" in precio.nombre:
+            cabecera.append({"text": "Kit Addi", "value": str(contador)})
+            contador += 1
+        elif "Precio premium" in precio.nombre:
+            cabecera.append({"text": "Kit Premium", "value": str(contador)})
+            contador += 1
+        elif "Precio sub" in precio.nombre:
+            cabecera.append({"text": "Kit Sub", "value": str(contador)})
+            contador += 1
+        elif "Precio Adelantos Valle" in precio.nombre:
+            cabecera.append({"text": "Kit Valle", "value": str(contador)})
+            contador += 1
 
-                # ==== NUEVO: saber si este producto es excepción de IVA ====
-                forzar_iva = row['stok'] in iva_excepciones
-                
-                temp_data = [row['stok']]
-                for precio in precios:
-                    variables2 = variables_by_price.get(precio.price_id_id, {})
-                    if precio.price_id_id != 1:
-                        variables1 = variables_by_price.get(1, {})
-                        variables2 = {**variables1, **variables2}
-                    
-                    dict_formula = ast.literal_eval(precio.formula)
-                    formula = ' '.join(dict_formula)
-                    
-                    if precio.id < 9:
-                        formula = formula.replace('=','==')
-                        formula = formula.replace('> ==','>=')
-                        formula = formula.replace('< ==','<=')
-                        formula = formula.replace('costo','Costo')
-                        formula = formula.replace('valor','Valor')
-                        formula = formula.replace('descuento','Descuento')
-                    
-                    formula = formula.replace('precioPublico', formula2)
-                    variables2 = {
-                        **variables2,
-                        'precioPublico': formula2,
-                        'PrecioPublico': formula2,
-                        'Sub': '',
-                        'Premium': '',
-                        'Fintech': '',
-                        'Addi': '',
-                        'Valle': ''
-                    }
+    cabecera.append({"text": "descuento", "value": str(contador)})
 
-                    for i in range(10):
-                        for key, value in variables2.items():
-                            formula = formula.replace(key, value)
-                    
-                    variables = {
-                        'Valor': row['valor'],
-                        'Costo': row['costo'],
-                        'Descuento': row['descuento'],
-                        'iva': iva
-                    }
-                    
-                    kit = 0
-                    kit_comprobante = False
-                    
-                    try:
-                        resultado = eval(formula, variables)
-                    except NameError:
-                        resultado = 0 
+    # Precio público (si existe)
+    formula_publico_obj = models.Formula.objects.filter(nombre="Precio publico").first()
+    formula2 = ""
+    if formula_publico_obj and formula_publico_obj.formula:
+        try:
+            formula2 = " ".join(ast.literal_eval(formula_publico_obj.formula))
+        except Exception:
+            formula2 = ""
 
-                    if (
-                        'Precio Fintech' in precio.nombre
-                        or 'Precio Addi' in precio.nombre
-                        or 'Precio Adelantos Valle' in precio.nombre
-                    ):
-                        kit_comprobante = True
-                        # aquí mantengo tu lógica original, porque el umbral
-                        # mezcla resultado + 2380 y valor original
-                        if resultado + 2380 >= iva and row['valor'] < iva:
-                            kit = resultado - iva + 2380
-                            resultado = iva - 2380
+    lista_productos = set()
 
-                    elif 'Precio premium' in precio.nombre:
-                        kit_comprobante = True
-                        # ==== AQUÍ aplicamos el "precio >= iva" O excepción ====
-                        if row['valor'] >= iva or forzar_iva:
-                           kit = resultado * 0.19
+    for _, row in nuevo_df.iterrows():
+        # row['stok'] es el nombre final del producto
+        stok = row.get("stok")
+        if stok is None or str(stok).strip() == "":
+            continue
 
-                    elif 'Precio sub' in precio.nombre:
-                        kit_comprobante = True
-                        # ==== AQUÍ tambén ====
-                        if row['valor'] >= iva or forzar_iva:
-                            kit = resultado * 0.19
-                    
-                    temp_data.append(resultado)
-                    if kit_comprobante:
-                        temp_data.append(kit)
-                
-                temp_data.append(row['descuento'])
-                data_response.append(temp_data)
+        stok_txt = str(stok).strip()
+        if stok_txt in lista_productos:
+            continue
+        lista_productos.add(stok_txt)
 
-        return Response({'validate': validate, 'data': data_response, 'crediminuto': [], 'cabecera': cabecera})
+        # Excepción IVA (comparación normalizada)
+        forzar_iva = norm_prod(stok_txt) in iva_excepciones_norm
+
+        temp_data = [stok_txt]
+
+        for precio in precios:
+            # Variables por precio
+            variables2 = variables_by_price.get(precio.price_id_id, {}).copy()
+            if precio.price_id_id != 1:
+                variables1 = variables_by_price.get(1, {})
+                variables2 = {**variables1, **variables2}
+
+            # Fórmula
+            try:
+                dict_formula = ast.literal_eval(precio.formula) if precio.formula else []
+                formula = " ".join(dict_formula) if isinstance(dict_formula, (list, tuple)) else str(dict_formula)
+            except Exception:
+                formula = ""
+
+            if precio.id < 9:
+                formula = formula.replace("=", "==")
+                formula = formula.replace("> ==", ">=")
+                formula = formula.replace("< ==", "<=")
+                formula = formula.replace("costo", "Costo")
+                formula = formula.replace("valor", "Valor")
+                formula = formula.replace("descuento", "Descuento")
+
+            formula = formula.replace("precioPublico", formula2)
+
+            variables2 = {
+                **variables2,
+                "precioPublico": formula2,
+                "PrecioPublico": formula2,
+                "Sub": "",
+                "Premium": "",
+                "Fintech": "",
+                "Addi": "",
+                "Valle": "",
+            }
+
+            # Reemplazos repetidos (tu patrón)
+            for _i in range(10):
+                for key, value in variables2.items():
+                    formula = formula.replace(key, value)
+
+            variables = {
+                "Valor": float(row["valor"]),
+                "Costo": float(row["costo"]),
+                "Descuento": float(row["descuento"]),
+                "iva": iva,
+            }
+
+            kit = 0
+            kit_comprobante = False
+
+            try:
+                resultado = eval(formula, {}, variables) if formula else 0
+            except Exception:
+                resultado = 0
+
+            # kits
+            if (
+                "Precio Fintech" in precio.nombre
+                or "Precio Addi" in precio.nombre
+                or "Precio Adelantos Valle" in precio.nombre
+            ):
+                kit_comprobante = True
+                if resultado + 2380 >= iva and row["valor"] < iva:
+                    kit = resultado - iva + 2380
+                    resultado = iva - 2380
+
+            elif "Precio premium" in precio.nombre:
+                kit_comprobante = True
+                if row["valor"] >= iva or forzar_iva:
+                    kit = resultado * 0.19
+
+            elif "Precio sub" in precio.nombre:
+                kit_comprobante = True
+                if row["valor"] >= iva or forzar_iva:
+                    kit = resultado * 0.19
+
+            temp_data.append(resultado)
+            if kit_comprobante:
+                temp_data.append(kit)
+
+        temp_data.append(float(row["descuento"]))
+        data_response.append(temp_data)
+
+    return Response(
+        {"validate": True, "data": data_response, "crediminuto": [], "cabecera": cabecera},
+        status=status.HTTP_200_OK,
+    )
 
 
 
