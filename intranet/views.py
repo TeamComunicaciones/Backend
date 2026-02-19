@@ -3459,7 +3459,7 @@ def buscar_precios(request):
 
     except Exception as e:
         print(f"ERROR en /buscar_precios: {str(e)}")
-        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)     
 
 
     
@@ -3764,6 +3764,7 @@ def usuario_detail(request, username):
         return Response({'status': 'deleted'}, status=status.HTTP_204_NO_CONTENT)
 
         
+
 @api_view(['POST'])
 @asesor_permission_required(allow_supervisor=True, allow_admin=True)
 @parser_classes([MultiPartParser, FormParser])
@@ -3776,8 +3777,22 @@ def subir_comprobante_view(request):
     file_obj = request.FILES.get('file')
 
     if not file_obj:
+        return Response({"error": "No se recibió ningún archivo."},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # ✅ Validaciones recomendadas
+    allowed_content_types = {"image/jpeg", "image/png", "image/webp"}
+    max_bytes = 5 * 1024 * 1024  # 5MB (ajusta a gusto)
+
+    if getattr(file_obj, "content_type", None) not in allowed_content_types:
         return Response(
-            {"error": "No se recibió ningún archivo."},
+            {"error": "Tipo de archivo no permitido. Sube una imagen JPG/PNG/WebP."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if getattr(file_obj, "size", 0) > max_bytes:
+        return Response(
+            {"error": "La imagen supera el tamaño máximo permitido (5MB)."},
             status=status.HTTP_400_BAD_REQUEST
         )
 
@@ -3790,12 +3805,10 @@ def subir_comprobante_view(request):
         )
 
     return Response(
-        {
-            "filename": data["filename"],
-            "web_url": data.get("web_url"),
-        },
+        {"filename": data["filename"], "web_url": data.get("web_url")},
         status=status.HTTP_200_OK
     )
+
 
 
 @api_view(['POST'])
