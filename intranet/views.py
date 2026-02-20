@@ -3156,58 +3156,63 @@ def should_show_kit(list_name, kit_name):
         
     return False
 
-def calculate_dynamic_total(equipo_sin_iva, kits):
+
+def calculate_dynamic_total(equipo_sin_iva, kits, forzar_iva=False):
     if not isinstance(equipo_sin_iva, Decimal):
         equipo_sin_iva = Decimal(str(equipo_sin_iva))
-    
+
     base_iva_excluido = Decimal('1152228')
     valor_sim = Decimal('2000')
     iva_sim = valor_sim * Decimal('0.19')
+    TASA_IVA = Decimal('0.19')
 
     iva_equipo = Decimal('0')
+
+    # Regla: cobra IVA si supera umbral O si está forzado
+    if equipo_sin_iva > base_iva_excluido or forzar_iva:
+        iva_equipo = equipo_sin_iva * TASA_IVA
+
+    # Total = equipo + IVA equipo + sim + IVA sim + suma kits (tal cual vengan)
     kit_total = Decimal('0')
-    
-    # Lógica de negocio para IVA y Kits
-    if equipo_sin_iva > base_iva_excluido:
-        iva_equipo = equipo_sin_iva * Decimal('0.19')
-    else:
-        kit_premium_valor = next((Decimal(str(k.get('valor', '0'))) for k in kits if k.get('nombre', '').lower() == 'kit premium'), Decimal('0'))
-        kit_total = kit_premium_valor
-    
+    for k in kits or []:
+        try:
+            kit_total += Decimal(str(k.get('valor', '0')))
+        except Exception:
+            pass
+
     return equipo_sin_iva + iva_equipo + valor_sim + iva_sim + kit_total
 
-def apply_iva_kit_rules(equipo_sin_iva, nombre_lista, kits_list, base_iva_excluido, TASA_IVA):
+
+def apply_iva_kit_rules(equipo_sin_iva, nombre_lista, kits_list, base_iva_excluido, TASA_IVA, forzar_iva=False):
     """
-    Función centralizada para aplicar las reglas de negocio del IVA y los Kits.
+    Regla central:
+    - Si equipo supera umbral OR forzar_iva=True => IVA EQUIPO = equipo * 0.19
+      y se anula el kit que corresponde a esa lista (para evitar doble IVA).
+    - Si NO supera umbral y NO está forzado => IVA EQUIPO = 0 y NO tocamos kits.
     """
-    kits_modificados = [dict(k) for k in kits_list] # Crear una copia para no alterar los datos originales
+    if not isinstance(equipo_sin_iva, Decimal):
+        equipo_sin_iva = Decimal(str(equipo_sin_iva))
+
+    kits_modificados = [dict(k) for k in (kits_list or [])]
     iva_equipo = Decimal('0')
 
-    if equipo_sin_iva > base_iva_excluido:
-        # REGLA 1: Si el equipo supera el umbral del IVA.
+    # Determinar kit asociado a la lista: "Precio premium" -> "kit premium"
+    lista_norm = (nombre_lista or '').strip().lower()
+    if lista_norm.startswith('precio '):
+        lista_norm = lista_norm.replace('precio ', '', 1).strip()
+    kit_objetivo = f'kit {lista_norm}'.strip()
+
+    debe_cobrar_iva = (equipo_sin_iva > base_iva_excluido) or bool(forzar_iva)
+
+    if debe_cobrar_iva:
         iva_equipo = equipo_sin_iva * TASA_IVA
-        kit_iva_nombre = "kit " + nombre_lista.replace("Precio ", "").lower()
+
+        # Si el IVA se cobra como IVA_equipo, anula el kit de esa lista para no duplicar.
         for kit in kits_modificados:
-            if kit.get('nombre', '').lower() == kit_iva_nombre:
-                kit['valor'] = 0.0 # Anula el kit correspondiente
+            if (kit.get('nombre') or '').strip().lower() == kit_objetivo:
+                kit['valor'] = 0.0
                 break
-    else:
-        # REGLA 2: Si el equipo NO supera el umbral del IVA.
-        if nombre_lista.lower() == 'precio premium':
-            # CORRECCIÓN: Para "Precio Premium" bajo el umbral, no se hace ninguna modificación.
-            pass
-        else:
-            # REGLA 2.2 (GENERAL): Para otras listas, el IVA se representa en el "Kit Premium".
-            iva_as_kit_premium = equipo_sin_iva * TASA_IVA
-            kit_found = False
-            for kit in kits_modificados:
-                if kit.get('nombre', '').lower() == 'kit premium':
-                    kit['valor'] = float(iva_as_kit_premium)
-                    kit_found = True
-                    break
-            if not kit_found:
-                kits_modificados.append({'nombre': 'Kit Premium', 'valor': float(iva_as_kit_premium)})
-    
+
     return iva_equipo, kits_modificados
 
 
@@ -3239,7 +3244,7 @@ def _zero_out_iva_kits_if_exento(kits_list):
 
 
 @api_view(['POST'])
-# @token_required # Descomenta si usas este decorador
+# @token_required  # Descomenta si usas este decorador
 def buscar_precios(request):
     try:
         # --- SECCIÓN DE FILTROS (SIN CAMBIOS) ---
@@ -3255,9 +3260,8 @@ def buscar_precios(request):
         if not listas_precios_nombres:
             return Response({'data': [], 'fecha_actual': 'N/A'})
 
-        # --- NUEVO: cargar excepciones de IVA (EXENTOS) ---
-        # Ojo: esto asume que "excepción" significa EXENTO (IVA=0) como tú lo necesitas.
-        iva_exentos_set = set(
+        # --- NUEVO: cargar excepciones (FORZAR IVA) ---
+        iva_forzados_set = set(
             normalize_string(p)
             for p in models.IvaExcepcion.objects.filter(tipo='prepago').values_list('producto', flat=True)
         )
@@ -3279,7 +3283,12 @@ def buscar_precios(request):
                 .annotate(latest_id=Max('id'))
                 .values('latest_id')
             )
-            precios_actuales_qs = models.Lista_precio.objects.filter(id__in=latest_price_ids_subquery).select_related('carga').order_by('-carga__fecha_carga', '-id')
+            precios_actuales_qs = (
+                models.Lista_precio.objects
+                .filter(id__in=latest_price_ids_subquery)
+                .select_related('carga')
+                .order_by('-carga__fecha_carga', '-id')
+            )
             fecha_actual_str = 'Todas (últimos registros)'
         else:
             if not carga_id_actual:
@@ -3293,14 +3302,19 @@ def buscar_precios(request):
             if not carga_actual:
                 return Response({'data': [], 'fecha_actual': 'No hay datos cargados'})
 
-            precios_actuales_qs = models.Lista_precio.objects.filter(
-                carga=carga_actual,
-                nombre__in=listas_precios_nombres
-            ).select_related('carga')
+            precios_actuales_qs = (
+                models.Lista_precio.objects
+                .filter(carga=carga_actual, nombre__in=listas_precios_nombres)
+                .select_related('carga')
+            )
             fecha_actual_str = carga_actual.fecha_carga.strftime('%d de %B de %Y')
 
         productos_lp_raw = precios_actuales_qs.values_list('producto', flat=True).distinct()
-        producto_lp_a_stok = {p_name: normalize_string(p_name) for p_name in productos_lp_raw if normalize_string(p_name) in mapa_traducciones}
+        producto_lp_a_stok = {
+            p_name: normalize_string(p_name)
+            for p_name in productos_lp_raw
+            if normalize_string(p_name) in mapa_traducciones
+        }
         stoks_encontrados_lp = list(producto_lp_a_stok.keys())
 
         if not stoks_encontrados_lp:
@@ -3318,15 +3332,40 @@ def buscar_precios(request):
             id_precio_anterior=Subquery(subquery_precio_anterior)
         )
 
-        ids_anteriores_a_buscar = [p.id_precio_anterior for p in precios_actuales_con_anterior if p.id_precio_anterior is not None]
+        ids_anteriores_a_buscar = [
+            p.id_precio_anterior
+            for p in precios_actuales_con_anterior
+            if p.id_precio_anterior is not None
+        ]
         precios_anteriores_encontrados = models.Lista_precio.objects.filter(id__in=ids_anteriores_a_buscar)
         mapa_precios_anteriores = {p.id: p for p in precios_anteriores_encontrados}
 
-        all_cargas_ids = models.Lista_precio.objects.filter(producto__in=stoks_encontrados_lp).values_list('carga_id', flat=True).distinct()
+        all_cargas_ids = (
+            models.Lista_precio.objects
+            .filter(producto__in=stoks_encontrados_lp)
+            .values_list('carga_id', flat=True)
+            .distinct()
+        )
 
-        all_kits_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre__icontains='Kit').exclude(nombre__icontains='Descuento Kit')
-        all_costos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='Costo')
-        all_descuentos_data = models.Lista_precio.objects.filter(carga_id__in=all_cargas_ids, producto__in=stoks_encontrados_lp, nombre='descuento')
+        all_kits_data = (
+            models.Lista_precio.objects
+            .filter(
+                carga_id__in=all_cargas_ids,
+                producto__in=stoks_encontrados_lp,
+                nombre__icontains='Kit'
+            )
+            .exclude(nombre__icontains='Descuento Kit')
+        )
+        all_costos_data = models.Lista_precio.objects.filter(
+            carga_id__in=all_cargas_ids,
+            producto__in=stoks_encontrados_lp,
+            nombre='Costo'
+        )
+        all_descuentos_data = models.Lista_precio.objects.filter(
+            carga_id__in=all_cargas_ids,
+            producto__in=stoks_encontrados_lp,
+            nombre='descuento'
+        )
 
         mapa_kits = defaultdict(list)
         mapa_costos = {}
@@ -3355,30 +3394,26 @@ def buscar_precios(request):
             nombre_lista = precio_actual.nombre
             carga_id = precio_actual.carga_id
 
-            # NUEVO: si está en excepciones => EXENTO (IVA=0)
-            exento_iva = prod_lower in iva_exentos_set
+            # FORZAR IVA si está en excepciones
+            forzar_iva = prod_lower in iva_forzados_set
 
             equipo_sin_iva_actual = precio_actual.valor
             kits_actuales_raw = mapa_kits.get((prod_lower, carga_id), [])
 
-            # Calcula IVA+Kits con tu función existente
+            # IVA + kits aplicando regla central (con forzar_iva)
             iva_equipo_actual, kits_data_to_send = apply_iva_kit_rules(
                 equipo_sin_iva_actual,
                 nombre_lista,
                 kits_actuales_raw,
                 base_iva_excluido,
-                TASA_IVA
+                TASA_IVA,
+                forzar_iva=forzar_iva
             )
-
-            # ===== NUEVO: si es EXENTO, fuerza IVA = 0 y kits IVA = 0 =====
-            if exento_iva:
-                iva_equipo_actual = Decimal('0')
-                kits_data_to_send = _zero_out_iva_kits_if_exento(kits_data_to_send)
 
             valor_anterior_bruto = None
             kits_anteriores_to_send = []
             carga_id_anterior = None
-            iva_equipo_anterior = Decimal('0')  # Inicializar IVA anterior
+            iva_equipo_anterior = Decimal('0')
 
             precio_anterior_obj = mapa_precios_anteriores.get(precio_actual.id_precio_anterior)
 
@@ -3388,24 +3423,21 @@ def buscar_precios(request):
                 kits_anteriores_raw = mapa_kits.get((prod_lower, carga_id_anterior), [])
                 kits_anteriores_to_send = kits_anteriores_raw
 
-                iva_equipo_anterior, _kits_tmp = apply_iva_kit_rules(
+                iva_equipo_anterior, _ = apply_iva_kit_rules(
                     valor_anterior_bruto,
                     nombre_lista,
                     kits_anteriores_raw,
                     base_iva_excluido,
-                    TASA_IVA
+                    TASA_IVA,
+                    forzar_iva=forzar_iva
                 )
 
-                # ===== NUEVO: mismo override en el anterior =====
-                if exento_iva:
-                    iva_equipo_anterior = Decimal('0')
-
-            # --- ZONA DE MODIFICACIÓN (igual pero usando IVA ya corregido) ---
+            # --- VARIACIÓN (compara equipo + IVA) ---
             variacion = {'indicador': 'neutral', 'diferencial': 0.0, 'porcentaje': 0.0}
 
             if valor_anterior_bruto is not None:
-                total_comparable_actual = equipo_sin_iva_actual + iva_equipo_actual
-                total_comparable_anterior = valor_anterior_bruto + iva_equipo_anterior
+                total_comparable_actual = Decimal(str(equipo_sin_iva_actual)) + Decimal(str(iva_equipo_actual))
+                total_comparable_anterior = Decimal(str(valor_anterior_bruto)) + Decimal(str(iva_equipo_anterior))
 
                 if total_comparable_anterior > 0:
                     diferencial = total_comparable_actual - total_comparable_anterior
@@ -3425,10 +3457,10 @@ def buscar_precios(request):
             if filtro_promo and not es_promo:
                 continue
 
-            # Total display con IVA ya corregido y kits ya corregidos
+            # Total visual: equipo + IVA equipo + SIM + IVA SIM + suma kits
             total_display = (
-                equipo_sin_iva_actual
-                + iva_equipo_actual
+                Decimal(str(equipo_sin_iva_actual))
+                + Decimal(str(iva_equipo_actual))
                 + Decimal('2000')
                 + (Decimal('2000') * TASA_IVA)
                 + sum(Decimal(str(k.get('valor', '0'))) for k in kits_data_to_send)
@@ -3439,8 +3471,8 @@ def buscar_precios(request):
                 'nombre_lista': nombre_lista,
                 'precio simcard': float(Decimal('2000')),
                 'IVA simcard': float(Decimal('2000') * TASA_IVA),
-                'equipo sin IVA': float(equipo_sin_iva_actual),
-                'IVA equipo': float(iva_equipo_actual),
+                'equipo sin IVA': float(Decimal(str(equipo_sin_iva_actual))),
+                'IVA equipo': float(Decimal(str(iva_equipo_actual))),
                 'kits': kits_data_to_send,
                 'indicador': variacion['indicador'],
                 'diferencial': variacion['diferencial'],
@@ -3459,7 +3491,7 @@ def buscar_precios(request):
 
     except Exception as e:
         print(f"ERROR en /buscar_precios: {str(e)}")
-        return Response({'detail': f'Error interno: {str(e)}'}, status=500)     
+        return Response({'detail': f'Error interno: {str(e)}'}, status=500)
 
 
     
@@ -4607,8 +4639,8 @@ def usuario_update_delete(request, username):
 @api_view(['POST'])
 def resumen_corresponsal(request):
     try:
-        fecha_str = request.data.get('fecha')
-        sucursal_code = request.data.get('sucursal')
+        fecha_str = request.data.get('fecha')          # Ej: "2025-11" o "2025-11-22"
+        sucursal_code = request.data.get('sucursal')   # Ej: "123" o "0"
 
         # --- INICIO DEBUG ---
         print("\n================= INICIO DEPURACIÓN ==================")
@@ -4618,84 +4650,127 @@ def resumen_corresponsal(request):
         if not fecha_str:
             return Response({'error': 'Fecha requerida'}, status=400)
 
-        filtro_principal = None
+        # =========================================================
+        # 1) FILTRO PRINCIPAL: CIERRE POR `fecha` (NO por fecha_consignacion)
+        #    Esto hace que funcione como tu imagen:
+        #    cierre 21/11 y 22/11 aunque el banco sea 24/11.
+        # =========================================================
         if len(fecha_str) == 7:
             year, month = map(int, fecha_str.split('-'))
-            filtro_principal = Q(fecha_consignacion__year=year, fecha_consignacion__month=month)
-            print(f"DEBUG: Estrategia de filtro: MES y AÑO ({year}-{month})")
+            filtro_principal = Q(fecha__year=year, fecha__month=month)
+            print(f"DEBUG: Estrategia de filtro CIERRE: MES y AÑO ({year}-{month}) usando `fecha`")
         else:
             fecha_dia = datetime.strptime(fecha_str, '%Y-%m-%d').date()
-            filtro_principal = Q(fecha_consignacion=fecha_dia)
-            print(f"DEBUG: Estrategia de filtro: DÍA EXACTO ({fecha_dia})")
+            # Si `fecha` es DateTimeField:
+            filtro_principal = Q(fecha__date=fecha_dia)
+            # Si `fecha` fuera DateField, usar:
+            # filtro_principal = Q(fecha=fecha_dia)
+            print(f"DEBUG: Estrategia de filtro CIERRE: DÍA EXACTO ({fecha_dia}) usando `fecha`")
 
         consignaciones_qs = models.Corresponsal_consignacion.objects.filter(
             filtro_principal,
             estado__in=['pendiente', 'saldado', 'Conciliado']
         ).distinct()
-        print(f"DEBUG [1]: Registros encontrados por FECHA y ESTADO: {consignaciones_qs.count()}")
+        print(f"DEBUG [1]: Registros encontrados por CIERRE(fecha) y ESTADO: {consignaciones_qs.count()}")
 
+        # =========================================================
+        # 2) FILTRO SUCURSAL (manteniendo lógica por terminal)
+        # =========================================================
         titulo = ''
+        sucursal_obj = None
         if sucursal_code and sucursal_code not in ['0', '-1']:
             sucursal_obj = models.Codigo_oficina.objects.filter(codigo=sucursal_code).first()
             if sucursal_obj:
-                print(f"DEBUG: Sucursal encontrada (código): '{sucursal_obj.codigo}'. Se filtrará por el terminal: '{sucursal_obj.terminal}'")
+                print(
+                    f"DEBUG: Sucursal encontrada (código): '{sucursal_obj.codigo}'. "
+                    f"Se filtrará por el terminal: '{sucursal_obj.terminal}'"
+                )
                 consignaciones_qs = consignaciones_qs.filter(codigo_incocredito=sucursal_obj.terminal)
                 titulo = sucursal_obj.terminal
                 print(f"DEBUG [2]: Registros restantes tras filtrar por SUCURSAL: {consignaciones_qs.count()}")
             else:
                 titulo = 'Sucursal Desconocida'
-                print(f"DEBUG: ADVERTENCIA - No se encontró un objeto Codigo_oficina para el código: {sucursal_code}")
+                print(f"DEBUG: ADVERTENCIA - No se encontró Codigo_oficina para el código: {sucursal_code}")
         else:
             titulo = 'Todas las sucursales'
             print("DEBUG: No se aplicó filtro de sucursal (se pidieron todas).")
 
+        # =========================================================
+        # 3) REGLA DE VISTA: excluir conciliados con detalle banco
+        # =========================================================
         consignaciones_para_vista = consignaciones_qs.exclude(
             Q(estado='Conciliado') & ~Q(detalle_banco__in=[None, ''])
         )
-        print(f"DEBUG [3]: Registros para la VISTA (excluyendo 'Conciliado' con detalle): {consignaciones_para_vista.count()}")
+        print(
+            f"DEBUG [3]: Registros para la VISTA (excluyendo 'Conciliado' con detalle): "
+            f"{consignaciones_para_vista.count()}"
+        )
 
-        # --- INICIO BLOQUE CORREGIDO ---
-        # Ahora filtramos Transacciones_sucursal usando la fecha de entrada (fecha_str)
-        # en lugar de las fechas de las consignaciones.
-        
-        print(f"DEBUG [4]: Creando filtro de CAJERO basado en la fecha de entrada: '{fecha_str}'")
+        # =========================================================
+        # 4) FILTRO CAJERO: también por CIERRE (`fecha`) según fecha_str
+        #    (ya lo tenías, pero lo dejo más exacto para mes)
+        # =========================================================
+        print(f"DEBUG [4]: Creando filtro de CAJERO basado en la fecha de entrada (CIERRE): '{fecha_str}'")
 
-        filtro_cajero = Q()
         if len(fecha_str) == 7:
-            fecha_inicio_naive = pd.to_datetime(fecha_str).to_pydatetime()
-            fecha_fin_naive = fecha_inicio_naive + pd.offsets.MonthEnd(1)
+            # rango: primer día 00:00:00 a último día 23:59:59
+            year, month = map(int, fecha_str.split('-'))
+            last_day = calendar.monthrange(year, month)[1]
+
+            fecha_inicio_naive = datetime(year, month, 1, 0, 0, 0)
+            fecha_fin_naive = datetime(year, month, last_day, 23, 59, 59)
+
             fecha_inicio = timezone.make_aware(fecha_inicio_naive)
             fecha_fin = timezone.make_aware(fecha_fin_naive)
+
             filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
-            print(f"DEBUG [5A]: Filtro de CAJERO por RANGO DE MES: {fecha_inicio} a {fecha_fin}")
+            print(f"DEBUG [5A]: Filtro CAJERO por RANGO DE MES: {fecha_inicio} a {fecha_fin}")
         else:
-            fecha_inicio_naive = datetime.strptime(fecha_str, '%Y-%m-%d')
-            fecha_fin_naive = fecha_inicio_naive.replace(hour=23, minute=59, second=59)
+            fecha_inicio_naive = datetime.strptime(fecha_str, '%Y-%m-%d').replace(hour=0, minute=0, second=0)
+            fecha_fin_naive = datetime.strptime(fecha_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+
             fecha_inicio = timezone.make_aware(fecha_inicio_naive)
             fecha_fin = timezone.make_aware(fecha_fin_naive)
+
             filtro_cajero = Q(fecha__range=(fecha_inicio, fecha_fin))
-            print(f"DEBUG [5A]: Filtro de CAJERO por RANGO DE DÍA: {fecha_inicio} a {fecha_fin}")
-            
+            print(f"DEBUG [5A]: Filtro CAJERO por RANGO DE DÍA: {fecha_inicio} a {fecha_fin}")
+
         transacciones_cajero_qs = models.Transacciones_sucursal.objects.filter(filtro_cajero)
-        print(f"DEBUG [5B]: Transacciones de cajero encontradas por FECHA: {transacciones_cajero_qs.count()}")
+        print(f"DEBUG [5B]: Transacciones de cajero encontradas por FECHA (cierre): {transacciones_cajero_qs.count()}")
 
-        if sucursal_code and sucursal_code not in ['0', '-1']:
+        # Si hay sucursal, aplica el MISMO criterio de "terminal" para cuadrar
+        if sucursal_obj:
+            transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_obj.terminal)
+            print(
+                f"DEBUG [5C]: Transacciones de cajero restantes tras filtrar por SUCURSAL(terminal): "
+                f"{transacciones_cajero_qs.count()}"
+            )
+        elif sucursal_code and sucursal_code not in ['0', '-1']:
+            # fallback si no se encontró sucursal_obj
             transacciones_cajero_qs = transacciones_cajero_qs.filter(codigo_incocredito=sucursal_code)
-            print(f"DEBUG [5C]: Transacciones de cajero restantes tras filtrar por SUCURSAL: {transacciones_cajero_qs.count()}")
-        # --- FIN BLOQUE CORREGIDO ---
+            print(
+                f"DEBUG [5C]: Transacciones de cajero restantes tras filtrar por SUCURSAL(código fallback): "
+                f"{transacciones_cajero_qs.count()}"
+            )
 
-
+        # =========================================================
+        # 5) Usuarios responsables
+        # =========================================================
         responsable_ids = consignaciones_qs.values_list('responsable', flat=True).distinct()
-        valid_responsable_ids = [int(id) for id in responsable_ids if id and str(id).isdigit()]
+        valid_responsable_ids = [int(i) for i in responsable_ids if i and str(i).isdigit()]
         usuarios_dict = {
-            user.id: user.username 
+            user.id: user.username
             for user in User.objects.filter(id__in=valid_responsable_ids)
         }
 
+        # =========================================================
+        # 6) DATA para vista (OJO: aquí ya se verá fecha(cierre) y fecha_consignacion(banco)
+        # =========================================================
         transacciones_data_vista = []
         for t in consignaciones_para_vista.order_by('-id'):
-            banco = getattr(t, 'banco', '')
+            banco = getattr(t, 'banco', '') or ''
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
+
             if banco == 'Venta doble proposito':
                 imei = getattr(t, 'imei', '') or ''
                 if imei:
@@ -4708,14 +4783,37 @@ def resumen_corresponsal(request):
                     responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
                 except (ValueError, TypeError):
                     pass
-            
-            nueva_transaccion = { 'id': t.id, 'valor': getattr(t, 'valor', 0) or 0, 'banco': banco, 'fecha_consignacion': t.fecha_consignacion, 'fecha': t.fecha, 'responsable': responsable_username, 'estado': getattr(t, 'estado', ''), 'detalle': getattr(t, 'detalle', '') or '', 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''), 'detalle_categoria': detalle_categoria, 'url': getattr(t, 'url', None), 'min': getattr(t, 'min', None), 'imei': getattr(t, 'imei', None), 'planilla': getattr(t, 'planilla', None) }
-            transacciones_data_vista.append(nueva_transaccion)
 
+            transacciones_data_vista.append({
+                'id': t.id,
+                'valor': getattr(t, 'valor', 0) or 0,
+                'banco': banco,
+
+                # IMPORTANTE:
+                # - fecha (cierre/carga): es la que debe “mandar” como en tu imagen
+                # - fecha_consignacion (banco): puede ser posterior (24/11)
+                'fecha': t.fecha,
+                'fecha_consignacion': t.fecha_consignacion,
+
+                'responsable': responsable_username,
+                'estado': getattr(t, 'estado', '') or '',
+                'detalle': getattr(t, 'detalle', '') or '',
+                'sucursal_nombre': getattr(t, 'codigo_incocredito', '') or '',
+                'detalle_categoria': detalle_categoria,
+                'url': getattr(t, 'url', None),
+                'min': getattr(t, 'min', None),
+                'imei': getattr(t, 'imei', None),
+                'planilla': getattr(t, 'planilla', None),
+            })
+
+        # =========================================================
+        # 7) DATA Excel (incluye todo el QS)
+        # =========================================================
         transacciones_data_excel = []
         for t in consignaciones_qs.order_by('-id'):
-            banco = getattr(t, 'banco', '')
+            banco = getattr(t, 'banco', '') or ''
             detalle_categoria = getattr(t, 'detalle_banco', '') or ''
+
             if banco == 'Venta doble proposito':
                 imei = getattr(t, 'imei', '') or ''
                 if imei:
@@ -4728,15 +4826,35 @@ def resumen_corresponsal(request):
                     responsable_username = usuarios_dict.get(int(responsable_id), 'Desconocido')
                 except (ValueError, TypeError):
                     pass
-            
-            nueva_transaccion = { 'id': t.id, 'valor': getattr(t, 'valor', 0) or 0, 'banco': banco, 'fecha_consignacion': t.fecha_consignacion, 'fecha': t.fecha, 'responsable': responsable_username, 'estado': getattr(t, 'estado', ''), 'detalle': getattr(t, 'detalle', '') or '', 'sucursal_nombre': getattr(t, 'codigo_incocredito', ''), 'detalle_categoria': detalle_categoria, 'url': getattr(t, 'url', None), 'min': getattr(t, 'min', None), 'imei': getattr(t, 'imei', None), 'planilla': getattr(t, 'planilla', None) }
-            transacciones_data_excel.append(nueva_transaccion)
 
+            transacciones_data_excel.append({
+                'id': t.id,
+                'valor': getattr(t, 'valor', 0) or 0,
+                'banco': banco,
+                'fecha': t.fecha,
+                'fecha_consignacion': t.fecha_consignacion,
+                'responsable': responsable_username,
+                'estado': getattr(t, 'estado', '') or '',
+                'detalle': getattr(t, 'detalle', '') or '',
+                'sucursal_nombre': getattr(t, 'codigo_incocredito', '') or '',
+                'detalle_categoria': detalle_categoria,
+                'url': getattr(t, 'url', None),
+                'min': getattr(t, 'min', None),
+                'imei': getattr(t, 'imei', None),
+                'planilla': getattr(t, 'planilla', None),
+            })
+
+        # =========================================================
+        # 8) Totales
+        # =========================================================
         valor_total_cajero = transacciones_cajero_qs.aggregate(Sum('valor'))['valor__sum'] or 0
         total_saldado = consignaciones_para_vista.filter(estado='saldado').aggregate(total=Sum('valor'))['total'] or 0
         total_pendiente = consignaciones_para_vista.filter(estado='pendiente').aggregate(total=Sum('valor'))['total'] or 0
-        
-        print(f"DEBUG [FINAL]: Totales calculados -> valor_cajero: {valor_total_cajero}, consignacion_saldado: {total_saldado}, pendiente: {total_pendiente}")
+
+        print(
+            f"DEBUG [FINAL]: Totales calculados -> "
+            f"valor_cajero: {valor_total_cajero}, consignacion_saldado: {total_saldado}, pendiente: {total_pendiente}"
+        )
         print("================== FIN DEPURACIÓN ===================\n")
 
         data = {
