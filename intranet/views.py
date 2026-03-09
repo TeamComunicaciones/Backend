@@ -148,15 +148,18 @@ def turnos_excel_template(request):
     if not month:
         month = date.today().strftime("%Y-%m")
 
+    # --- calcular rango del mes (sin .date() porque ya es date) ---
     y, m = map(int, month.split("-"))
     start = date(y, m, 1)
-    # último día del mes
+
+    # primer día del mes siguiente
     if m == 12:
-        end = date(y+1, 1, 1) - datetime.resolution
-        end = end.date()
+        next_month = date(y + 1, 1, 1)
     else:
-        end = date(y, m+1, 1) - datetime.resolution
-        end = end.date()
+        next_month = date(y, m + 1, 1)
+
+    # último día del mes actual
+    end = next_month - timedelta(days=1)
 
     personas = PersonaTurnos.objects.filter(owner=request.user, activo=True).order_by("orden", "nombre")
     plantillas = TurnoPlantilla.objects.filter(owner=request.user, activo=True).order_by("codigo")
@@ -171,7 +174,12 @@ def turnos_excel_template(request):
 
     # Sheet: PLANTILLAS
     ws_p = wb.create_sheet("PLANTILLAS")
-    ws_p.append(["codigo", "nombre", "entrada_1", "salida_1", "entrada_2", "salida_2", "almuerzo_inicio", "almuerzo_fin"])
+    ws_p.append([
+        "codigo", "nombre",
+        "entrada_1", "salida_1",
+        "entrada_2", "salida_2",
+        "almuerzo_inicio", "almuerzo_fin"
+    ])
     for t in plantillas:
         ws_p.append([
             t.codigo, t.nombre,
@@ -186,28 +194,34 @@ def turnos_excel_template(request):
     ws_u = wb.create_sheet("PERSONAS")
     ws_u.append(["persona_id", "nombre", "grupo"])
     for p in personas:
-        ws_u.append([p.id, p.nombre, p.grupo.nombre if p.grupo else ""])
+        ws_u.append([p.id, p.nombre, p.grupo.nombre if getattr(p, "grupo", None) else ""])
 
     # Sheet: MATRIZ
     ws_m = wb.create_sheet("MATRIZ")
-    # headers
+
     headers = ["persona_id", "nombre", "grupo"]
     cur = start
     date_cols = []
     while cur <= end:
-        headers.append(cur.isoformat())
-        date_cols.append(cur.isoformat())
-        cur = cur + datetime.timedelta(days=1)  # si te falla, usa timedelta import arriba
+        iso = cur.isoformat()
+        headers.append(iso)
+        date_cols.append(iso)
+        cur = cur + timedelta(days=1)
 
     ws_m.append(headers)
 
     for p in personas:
-        row = [p.id, p.nombre, p.grupo.nombre if p.grupo else ""]
-        # celdas vacías para códigos
-        row += [""] * len(date_cols)
+        row = [p.id, p.nombre, p.grupo.nombre if getattr(p, "grupo", None) else ""]
+        row += [""] * len(date_cols)  # celdas vacías para códigos T1/T2...
         ws_m.append(row)
 
-    # ancho columnas fijo
+    # (Opcional) Forzar encabezados de fechas como texto para que Excel no cambie formato
+    # Esto evita que Excel convierta "2026-03-01" a fecha y lo muestre distinto.
+    # Si te gusta como fecha, puedes borrar este bloque.
+    for col_idx in range(4, 4 + len(date_cols)):
+        ws_m.cell(row=1, column=col_idx).number_format = "@"
+
+    # ancho columnas
     ws_m.column_dimensions["A"].width = 10
     ws_m.column_dimensions["B"].width = 30
     ws_m.column_dimensions["C"].width = 22
