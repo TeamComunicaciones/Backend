@@ -3,6 +3,7 @@ from django.contrib.auth.hashers import make_password, check_password
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.conf import settings
+from django.core.exceptions import ValidationError
 
 class Perfil(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -486,3 +487,154 @@ class TransparencyReport(models.Model):
     def __str__(self):
         return f"{self.get_report_type_display()} - {self.created_at:%Y-%m-%d %H:%M}"
     
+from django.db import models
+from django.conf import settings
+from django.core.exceptions import ValidationError
+
+
+class PersonaTurnos(models.Model):
+    """
+    Personas que agregas manualmente para el planificador (NO son usuarios).
+    """
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="personas_turnos"
+    )
+    nombre = models.CharField(max_length=120)
+    activo = models.BooleanField(default=True)
+    orden = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["orden", "nombre"]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "nombre"], name="unique_owner_nombre_persona_turnos")
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+
+class TurnoPlanner(models.Model):
+    """
+    Turno por persona y fecha. Soporta turno partido (2 tramos) y almuerzo.
+    """
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="turnos_planner"
+    )
+    persona = models.ForeignKey(
+        PersonaTurnos,
+        on_delete=models.CASCADE,
+        related_name="turnos"
+    )
+    fecha = models.DateField(db_index=True)
+
+    # Tramo 1
+    entrada_1 = models.TimeField()
+    salida_1 = models.TimeField()
+
+    # Tramo 2 (opcional)
+    entrada_2 = models.TimeField(null=True, blank=True)
+    salida_2 = models.TimeField(null=True, blank=True)
+
+    # Almuerzo (opcional)
+    almuerzo_inicio = models.TimeField(null=True, blank=True)
+    almuerzo_fin = models.TimeField(null=True, blank=True)
+
+    nota = models.CharField(max_length=255, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-fecha", "persona_id"]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "persona", "fecha"], name="unique_owner_persona_fecha_turnoplanner")
+        ]
+
+    def __str__(self):
+        return f"{self.persona.nombre} - {self.fecha}"
+
+    @staticmethod
+    def _t2m(t):
+        return t.hour * 60 + t.minute
+
+    @staticmethod
+    def _subtract_interval(base_start, base_end, sub_start, sub_end):
+        if sub_end <= base_start or sub_start >= base_end:
+            return [(base_start, base_end)]
+        if sub_start <= base_start and sub_end >= base_end:
+            return []
+        if sub_start <= base_start < sub_end < base_end:
+            return [(sub_end, base_end)]
+        if base_start < sub_start < base_end <= sub_end:
+            return [(base_start, sub_start)]
+        if base_start < sub_start and sub_end < base_end:
+            return [(base_start, sub_start), (sub_end, base_end)]
+        return [(base_start, base_end)]
+
+    def clean(self):
+        if self.entrada_1 >= self.salida_1:
+            raise ValidationError("En tramo 1, entrada_1 debe ser menor que salida_1.")
+
+        tramo2_parcial = (self.entrada_2 is None) ^ (self.salida_2 is None)
+        if tramo2_parcial:
+            raise ValidationError("Si usas tramo 2, debes enviar entrada_2 y salida_2.")
+        if self.entrada_2 and self.salida_2 and self.entrada_2 >= self.salida_2:
+            raise ValidationError("En tramo 2, entrada_2 debe ser menor que salida_2.")
+
+        almuerzo_parcial = (self.almuerzo_inicio is None) ^ (self.almuerzo_fin is None)
+        if almuerzo_parcial:
+            raise ValidationError("Si usas almuerzo, debes enviar almuerzo_inicio y almuerzo_fin.")
+        if self.almuerzo_inicio and self.almuerzo_fin and self.almuerzo_inicio >= self.almuerzo_fin:
+            raise ValidationError("almuerzo_inicio debe ser menor que almuerzo_fin.")
+
+    def work_intervals_minutes(self):
+        intervals = [(self._t2m(self.entrada_1), self._t2m(self.salida_1))]
+        if self.entrada_2 and self.salida_2:
+            intervals.append((self._t2m(self.entrada_2), self._t2m(self.salida_2)))
+
+        if self.almuerzo_inicio and self.almuerzo_fin:
+            ls, le = self._t2m(self.almuerzo_inicio), self._t2m(self.almuerzo_fin)
+            new_intervals = []
+            for bs, be in intervals:
+                new_intervals.extend(self._subtract_interval(bs, be, ls, le))
+            intervals = new_intervals
+
+        return intervals
+
+    @property
+    def total_minutes(self):
+        return sum(max(0, e - s) for s, e in self.work_intervals_minutes())
+
+    @property
+    def total_hours(self):
+        return self.total_minutes / 60.0
+
+class Turno(models.Model):
+    """
+    Turno por persona y fecha.
+    Soporta turno partido (dos tramos) y almuerzo (intervalo opcional).
+    """
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="turnos")
+    fecha = models.DateField(db_index=True)
+
+    # Tramo 1
+    entrada_1 = models.TimeField()
+    salida_1 = models.TimeField()
+
+    # Tramo 2 (opcional)
+    entrada_2 = models.TimeField(null=True, blank=True)
+    salida_2 = models.TimeField(null=True, blank=True)
+
+    # Almuerzo (opcional)
+    almuerzo_inicio = models.TimeField(null=True, blank=True)
+    almuerzo_fin = models.TimeField(null=True, blank=True)
+
+    nota = models.CharField(max_length=255, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)

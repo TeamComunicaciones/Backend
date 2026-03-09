@@ -3,6 +3,8 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
+from .models import PersonaTurnos, TurnoPlanner
 
 from .models import (
     ActaEntrega,
@@ -463,3 +465,43 @@ class AsesorSerializer(serializers.ModelSerializer):
             user=user,
             permiso__permiso=otro_rol
         ).update(tiene_permiso=False)
+        
+class PersonaTurnosSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PersonaTurnos
+        fields = ["id", "nombre", "activo", "orden", "created_at"]
+
+
+class TurnoPlannerSerializer(serializers.ModelSerializer):
+    persona_nombre = serializers.CharField(source="persona.nombre", read_only=True)
+    total_horas = serializers.FloatField(source="total_hours", read_only=True)
+
+    class Meta:
+        model = TurnoPlanner
+        fields = [
+            "id",
+            "persona", "persona_nombre",
+            "fecha",
+            "entrada_1", "salida_1",
+            "entrada_2", "salida_2",
+            "almuerzo_inicio", "almuerzo_fin",
+            "nota",
+            "total_horas",
+            "created_at", "updated_at",
+        ]
+
+    def validate(self, attrs):
+        # Reusa clean() del modelo sin depender de instance.save()
+        dummy = TurnoPlanner(
+            owner=getattr(self.instance, "owner", None),
+            persona=attrs.get("persona") or getattr(self.instance, "persona", None),
+            fecha=attrs.get("fecha") or getattr(self.instance, "fecha", None),
+            entrada_1=attrs.get("entrada_1") or getattr(self.instance, "entrada_1", None),
+            salida_1=attrs.get("salida_1") or getattr(self.instance, "salida_1", None),
+            entrada_2=attrs.get("entrada_2", getattr(self.instance, "entrada_2", None)),
+            salida_2=attrs.get("salida_2", getattr(self.instance, "salida_2", None)),
+            almuerzo_inicio=attrs.get("almuerzo_inicio", getattr(self.instance, "almuerzo_inicio", None)),
+            almuerzo_fin=attrs.get("almuerzo_fin", getattr(self.instance, "almuerzo_fin", None)),
+        )
+        dummy.clean()
+        return attrs

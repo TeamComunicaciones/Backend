@@ -140,4 +140,11 @@ urlpatterns = [
         views.transparency_report_view,
         name='transparency-report'
     ),
+    path("turnos/personas/", views.persona_list_create),
+    path("turnos/personas/<int:pk>/", views.persona_detail),
+
+    path("turnos/", views.turno_list_create),
+    path("turnos/<int:pk>/", views.turno_detail),
+    path("turnos/resumen/", views.turnos_resumen),
+    path("turnos/cobertura/", views.turnos_cobertura),
 ]

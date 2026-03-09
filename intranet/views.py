@@ -134,6 +134,216 @@ from .permissions import admin_permission_required # Asegúrate de que esta impo
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
 from rest_framework.views import APIView
+from .models import PersonaTurnos, TurnoPlanner
+from .serializers import PersonaTurnosSerializer, TurnoPlannerSerializer
+
+def _parse_date(s: str):
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+# ---------------- PERSONAS ----------------
+
+@api_view(["GET", "POST"])
+@admin_permission_required
+def persona_list_create(request):
+    if request.method == "GET":
+        qs = PersonaTurnos.objects.filter(owner=request.user).order_by("orden", "nombre")
+        return Response(PersonaTurnosSerializer(qs, many=True).data)
+
+    ser = PersonaTurnosSerializer(data=request.data)
+    if ser.is_valid():
+        obj = ser.save(owner=request.user)
+        return Response(PersonaTurnosSerializer(obj).data, status=status.HTTP_201_CREATED)
+    return Response(ser.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+@admin_permission_required
+def persona_detail(request, pk: int):
+    try:
+        obj = PersonaTurnos.objects.get(pk=pk, owner=request.user)
+    except PersonaTurnos.DoesNotExist:
+        return Response({"detail": "No encontrado."}, status=404)
+
+    if request.method == "GET":
+        return Response(PersonaTurnosSerializer(obj).data)
+
+    if request.method in ["PUT", "PATCH"]:
+        ser = PersonaTurnosSerializer(obj, data=request.data, partial=(request.method == "PATCH"))
+        if ser.is_valid():
+            obj = ser.save()
+            return Response(PersonaTurnosSerializer(obj).data)
+        return Response(ser.errors, status=400)
+
+    obj.delete()
+    return Response(status=204)
+
+
+# ---------------- TURNOS (TurnoPlanner) ----------------
+
+@api_view(["GET", "POST"])
+@admin_permission_required
+def turno_list_create(request):
+    """
+    GET: lista por rango start/end y opcional persona_id
+    POST: upsert por (owner, persona, fecha)
+    """
+    if request.method == "GET":
+        qs = TurnoPlanner.objects.select_related("persona").filter(owner=request.user)
+
+        start = request.GET.get("start")
+        end = request.GET.get("end")
+        persona_id = request.GET.get("persona_id")
+
+        if start:
+            qs = qs.filter(fecha__gte=_parse_date(start))
+        if end:
+            qs = qs.filter(fecha__lte=_parse_date(end))
+        if persona_id:
+            qs = qs.filter(persona_id=persona_id)
+
+        return Response(TurnoPlannerSerializer(qs, many=True).data)
+
+    ser = TurnoPlannerSerializer(data=request.data)
+    if not ser.is_valid():
+        return Response(ser.errors, status=400)
+
+    data = ser.validated_data
+    persona = data["persona"]
+    fecha = data["fecha"]
+
+    if persona.owner_id != request.user.id:
+        return Response({"detail": "Persona inválida."}, status=403)
+
+    obj, created = TurnoPlanner.objects.update_or_create(
+        owner=request.user,
+        persona=persona,
+        fecha=fecha,
+        defaults={
+            "entrada_1": data["entrada_1"],
+            "salida_1": data["salida_1"],
+            "entrada_2": data.get("entrada_2"),
+            "salida_2": data.get("salida_2"),
+            "almuerzo_inicio": data.get("almuerzo_inicio"),
+            "almuerzo_fin": data.get("almuerzo_fin"),
+            "nota": data.get("nota"),
+        }
+    )
+    return Response(TurnoPlannerSerializer(obj).data, status=201 if created else 200)
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+@admin_permission_required
+def turno_detail(request, pk: int):
+    try:
+        obj = TurnoPlanner.objects.select_related("persona").get(pk=pk, owner=request.user)
+    except TurnoPlanner.DoesNotExist:
+        return Response({"detail": "No encontrado."}, status=404)
+
+    if request.method == "GET":
+        return Response(TurnoPlannerSerializer(obj).data)
+
+    if request.method in ["PUT", "PATCH"]:
+        ser = TurnoPlannerSerializer(obj, data=request.data, partial=(request.method == "PATCH"))
+        if ser.is_valid():
+            persona = ser.validated_data.get("persona")
+            if persona and persona.owner_id != request.user.id:
+                return Response({"detail": "Persona inválida."}, status=403)
+
+            obj = ser.save()
+            return Response(TurnoPlannerSerializer(obj).data)
+        return Response(ser.errors, status=400)
+
+    obj.delete()
+    return Response(status=204)
+
+
+@api_view(["GET"])
+@admin_permission_required
+def turnos_resumen(request):
+    start = request.GET.get("start")
+    end = request.GET.get("end")
+    if not start or not end:
+        return Response({"detail": "Debes enviar start y end (YYYY-MM-DD)."}, status=400)
+
+    d1 = _parse_date(start)
+    d2 = _parse_date(end)
+
+    qs = TurnoPlanner.objects.select_related("persona").filter(owner=request.user, fecha__gte=d1, fecha__lte=d2)
+
+    acc = {}
+    for t in qs:
+        pid = t.persona_id
+        if pid not in acc:
+            acc[pid] = {"persona_id": pid, "nombre": t.persona.nombre, "minutos": 0}
+        acc[pid]["minutos"] += t.total_minutes
+
+    items = [{
+        "persona_id": v["persona_id"],
+        "nombre": v["nombre"],
+        "horas": round(v["minutos"] / 60.0, 2)
+    } for v in acc.values()]
+
+    items.sort(key=lambda x: x["nombre"])
+    return Response({"start": start, "end": end, "items": items})
+
+
+@api_view(["GET"])
+@admin_permission_required
+def turnos_cobertura(request):
+    start = request.GET.get("start")
+    end = request.GET.get("end")
+    if not start or not end:
+        return Response({"detail": "Debes enviar start y end (YYYY-MM-DD)."}, status=400)
+
+    step = int(request.GET.get("step", "60"))
+    day_start = request.GET.get("day_start", "00:00")
+    day_end = request.GET.get("day_end", "23:59")
+
+    d1 = _parse_date(start)
+    d2 = _parse_date(end)
+
+    def t2m(hhmm: str):
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+
+    start_min = t2m(day_start)
+    end_min = t2m(day_end)
+
+    qs = TurnoPlanner.objects.select_related("persona").filter(owner=request.user, fecha__gte=d1, fecha__lte=d2)
+
+    by_date = {}
+    for t in qs:
+        by_date.setdefault(t.fecha, []).append(t)
+
+    days = []
+    cur = d1
+    while cur <= d2:
+        slots = []
+        slot_min = start_min
+
+        while slot_min < end_min:
+            slot_end = slot_min + step
+            active_personas = set()
+
+            for t in by_date.get(cur, []):
+                for ws, we in t.work_intervals_minutes():
+                    if max(ws, slot_min) < min(we, slot_end):
+                        active_personas.add(t.persona_id)
+                        break
+
+            slots.append({"time": f"{slot_min//60:02d}:{slot_min%60:02d}", "count": len(active_personas)})
+            slot_min += step
+
+        days.append({"date": cur.isoformat(), "slots": slots})
+        cur += timedelta(days=1)
+
+    return Response({
+        "start": start, "end": end,
+        "step": step,
+        "day_start": day_start, "day_end": day_end,
+        "days": days
+    })
 
 logger = logging.getLogger(__name__)
 
