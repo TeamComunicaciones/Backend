@@ -19,6 +19,8 @@ import decimal
 from django.conf import settings
 from django.core.mail import EmailMessage, get_connection
 from .tasks import enviar_transparency_email
+import openpyxl
+from openpyxl.utils import get_column_letter
 
 import unicodedata
 
@@ -134,12 +136,248 @@ from .permissions import admin_permission_required # Asegúrate de que esta impo
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
 from rest_framework.views import APIView
-from .models import PersonaTurnos, TurnoPlanner
-from .serializers import PersonaTurnosSerializer, TurnoPlannerSerializer
+from .models import PersonaTurnos, TurnoPlanner,  GrupoTrabajo, TurnoPlantilla
+from .serializers import PersonaTurnosSerializer, TurnoPlannerSerializer, GrupoTrabajoSerializer, TurnoPlantillaSerializer, PersonaTurnosSerializer
 
 def _parse_date(s: str):
     return datetime.strptime(s, "%Y-%m-%d").date()
+@api_view(["GET"])
+@admin_permission_required
+def turnos_excel_template(request):
+    month = request.GET.get("month")  # YYYY-MM
+    if not month:
+        month = date.today().strftime("%Y-%m")
 
+    y, m = map(int, month.split("-"))
+    start = date(y, m, 1)
+    # último día del mes
+    if m == 12:
+        end = date(y+1, 1, 1) - datetime.resolution
+        end = end.date()
+    else:
+        end = date(y, m+1, 1) - datetime.resolution
+        end = end.date()
+
+    personas = PersonaTurnos.objects.filter(owner=request.user, activo=True).order_by("orden", "nombre")
+    plantillas = TurnoPlantilla.objects.filter(owner=request.user, activo=True).order_by("codigo")
+
+    wb = openpyxl.Workbook()
+    ws_info = wb.active
+    ws_info.title = "INFO"
+    ws_info["A1"] = "Instrucciones"
+    ws_info["A2"] = "1) Ve a MATRIZ y escribe el código de plantilla (T1, T2...) en cada día."
+    ws_info["A3"] = "2) Guarda y sube el archivo en el módulo de turnos."
+    ws_info["A4"] = "3) Si dejas vacío, no se crea turno."
+
+    # Sheet: PLANTILLAS
+    ws_p = wb.create_sheet("PLANTILLAS")
+    ws_p.append(["codigo", "nombre", "entrada_1", "salida_1", "entrada_2", "salida_2", "almuerzo_inicio", "almuerzo_fin"])
+    for t in plantillas:
+        ws_p.append([
+            t.codigo, t.nombre,
+            t.entrada_1.strftime("%H:%M"), t.salida_1.strftime("%H:%M"),
+            t.entrada_2.strftime("%H:%M") if t.entrada_2 else "",
+            t.salida_2.strftime("%H:%M") if t.salida_2 else "",
+            t.almuerzo_inicio.strftime("%H:%M") if t.almuerzo_inicio else "",
+            t.almuerzo_fin.strftime("%H:%M") if t.almuerzo_fin else "",
+        ])
+
+    # Sheet: PERSONAS
+    ws_u = wb.create_sheet("PERSONAS")
+    ws_u.append(["persona_id", "nombre", "grupo"])
+    for p in personas:
+        ws_u.append([p.id, p.nombre, p.grupo.nombre if p.grupo else ""])
+
+    # Sheet: MATRIZ
+    ws_m = wb.create_sheet("MATRIZ")
+    # headers
+    headers = ["persona_id", "nombre", "grupo"]
+    cur = start
+    date_cols = []
+    while cur <= end:
+        headers.append(cur.isoformat())
+        date_cols.append(cur.isoformat())
+        cur = cur + datetime.timedelta(days=1)  # si te falla, usa timedelta import arriba
+
+    ws_m.append(headers)
+
+    for p in personas:
+        row = [p.id, p.nombre, p.grupo.nombre if p.grupo else ""]
+        # celdas vacías para códigos
+        row += [""] * len(date_cols)
+        ws_m.append(row)
+
+    # ancho columnas fijo
+    ws_m.column_dimensions["A"].width = 10
+    ws_m.column_dimensions["B"].width = 30
+    ws_m.column_dimensions["C"].width = 22
+    for idx in range(4, 4 + len(date_cols)):
+        ws_m.column_dimensions[get_column_letter(idx)].width = 12
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+
+    resp = HttpResponse(
+        bio.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    resp["Content-Disposition"] = f'attachment; filename="turnos_template_{month}.xlsx"'
+    return resp
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser, FormParser])
+@admin_permission_required
+def turnos_excel_import(request):
+    f = request.FILES.get("file")
+    if not f:
+        return Response({"detail": "Debes enviar file."}, status=400)
+
+    wb = openpyxl.load_workbook(f, data_only=True)
+    if "MATRIZ" not in wb.sheetnames:
+        return Response({"detail": "El archivo debe tener hoja 'MATRIZ'."}, status=400)
+
+    ws = wb["MATRIZ"]
+
+    # headers
+    header = [c.value for c in ws[1]]
+    if len(header) < 5 or header[0] != "persona_id":
+        return Response({"detail": "Formato inválido. Encabezados deben iniciar con persona_id, nombre, grupo, YYYY-MM-DD..."}, status=400)
+
+    date_headers = header[3:]  # desde la columna 4
+    # cargar plantillas del usuario
+    plantillas = {t.codigo.upper(): t for t in TurnoPlantilla.objects.filter(owner=request.user, activo=True)}
+    created = 0
+    updated = 0
+    errors = []
+
+    for r in ws.iter_rows(min_row=2, values_only=True):
+        persona_id = r[0]
+        if not persona_id:
+            continue
+
+        try:
+            persona = PersonaTurnos.objects.get(pk=int(persona_id), owner=request.user)
+        except Exception:
+            errors.append(f"Persona id {persona_id} no existe.")
+            continue
+
+        # codes per day
+        codes = r[3:]  # desde fecha1
+        for idx, code in enumerate(codes):
+            if not code:
+                continue
+            code_str = str(code).strip().upper()
+            if not code_str:
+                continue
+
+            day_iso = str(date_headers[idx])
+            try:
+                fecha = datetime.strptime(day_iso, "%Y-%m-%d").date()
+            except Exception:
+                errors.append(f"Encabezado de fecha inválido: {day_iso}")
+                continue
+
+            plantilla = plantillas.get(code_str)
+            if not plantilla:
+                errors.append(f"Plantilla '{code_str}' no existe (persona {persona.nombre}, fecha {day_iso})")
+                continue
+
+            obj, was_created = TurnoPlanner.objects.update_or_create(
+                owner=request.user,
+                persona=persona,
+                fecha=fecha,
+                defaults={
+                    "entrada_1": plantilla.entrada_1,
+                    "salida_1": plantilla.salida_1,
+                    "entrada_2": plantilla.entrada_2,
+                    "salida_2": plantilla.salida_2,
+                    "almuerzo_inicio": plantilla.almuerzo_inicio,
+                    "almuerzo_fin": plantilla.almuerzo_fin,
+                    "nota": f"Import Excel ({plantilla.codigo})",
+                }
+            )
+            if was_created: created += 1
+            else: updated += 1
+
+    return Response({
+        "created": created,
+        "updated": updated,
+        "errors": errors[:200]  # evita respuestas enormes
+    })
+
+# -------- GRUPOS --------
+@api_view(["GET", "POST"])
+@admin_permission_required
+def grupo_list_create(request):
+    if request.method == "GET":
+        qs = GrupoTrabajo.objects.filter(owner=request.user).order_by("orden", "nombre")
+        return Response(GrupoTrabajoSerializer(qs, many=True).data)
+
+    ser = GrupoTrabajoSerializer(data=request.data)
+    if ser.is_valid():
+        obj = ser.save(owner=request.user)
+        return Response(GrupoTrabajoSerializer(obj).data, status=201)
+    return Response(ser.errors, status=400)
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+@admin_permission_required
+def grupo_detail(request, pk: int):
+    try:
+        obj = GrupoTrabajo.objects.get(pk=pk, owner=request.user)
+    except GrupoTrabajo.DoesNotExist:
+        return Response({"detail": "No encontrado."}, status=404)
+
+    if request.method == "GET":
+        return Response(GrupoTrabajoSerializer(obj).data)
+
+    if request.method in ["PUT", "PATCH"]:
+        ser = GrupoTrabajoSerializer(obj, data=request.data, partial=(request.method == "PATCH"))
+        if ser.is_valid():
+            obj = ser.save()
+            return Response(GrupoTrabajoSerializer(obj).data)
+        return Response(ser.errors, status=400)
+
+    obj.delete()
+    return Response(status=204)
+
+
+# -------- PLANTILLAS --------
+@api_view(["GET", "POST"])
+@admin_permission_required
+def plantilla_list_create(request):
+    if request.method == "GET":
+        qs = TurnoPlantilla.objects.filter(owner=request.user).order_by("codigo")
+        return Response(TurnoPlantillaSerializer(qs, many=True).data)
+
+    ser = TurnoPlantillaSerializer(data=request.data)
+    if ser.is_valid():
+        obj = ser.save(owner=request.user)
+        return Response(TurnoPlantillaSerializer(obj).data, status=201)
+    return Response(ser.errors, status=400)
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
+@admin_permission_required
+def plantilla_detail(request, pk: int):
+    try:
+        obj = TurnoPlantilla.objects.get(pk=pk, owner=request.user)
+    except TurnoPlantilla.DoesNotExist:
+        return Response({"detail": "No encontrado."}, status=404)
+
+    if request.method == "GET":
+        return Response(TurnoPlantillaSerializer(obj).data)
+
+    if request.method in ["PUT", "PATCH"]:
+        ser = TurnoPlantillaSerializer(obj, data=request.data, partial=(request.method == "PATCH"))
+        if ser.is_valid():
+            obj = ser.save()
+            return Response(TurnoPlantillaSerializer(obj).data)
+        return Response(ser.errors, status=400)
+
+    obj.delete()
+    return Response(status=204)
 
 # ---------------- PERSONAS ----------------
 

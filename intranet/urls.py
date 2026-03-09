@@ -147,4 +147,11 @@ urlpatterns = [
     path("turnos/<int:pk>/", views.turno_detail),
     path("turnos/resumen/", views.turnos_resumen),
     path("turnos/cobertura/", views.turnos_cobertura),
+    path("turnos/grupos/", views.grupo_list_create),
+    path("turnos/grupos/<int:pk>/", views.grupo_detail),
+
+    path("turnos/plantillas/", views.plantilla_list_create),
+    path("turnos/plantillas/<int:pk>/", views.plantilla_detail),
+    path("turnos/excel/template/", views.turnos_excel_template),
+    path("turnos/excel/import/", views.turnos_excel_import),
 ]

@@ -491,17 +491,57 @@ from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
 
+class GrupoTrabajo(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="turnos_grupos")
+    nombre = models.CharField(max_length=120)
+    color = models.CharField(max_length=20, default="#198754")  # opcional (hex)
+    orden = models.PositiveIntegerField(default=0)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["orden", "nombre"]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "nombre"], name="unique_owner_grupo_nombre")
+        ]
+
+    def __str__(self):
+        return self.nombre
+
+
+class TurnoPlantilla(models.Model):
+    """
+    Plantillas tipo Turno 1 (T1), Turno 2 (T2)...
+    """
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="turnos_plantillas")
+    codigo = models.CharField(max_length=10)  # "T1", "T2"
+    nombre = models.CharField(max_length=120)
+
+    entrada_1 = models.TimeField()
+    salida_1 = models.TimeField()
+    entrada_2 = models.TimeField(null=True, blank=True)
+    salida_2 = models.TimeField(null=True, blank=True)
+    almuerzo_inicio = models.TimeField(null=True, blank=True)
+    almuerzo_fin = models.TimeField(null=True, blank=True)
+
+    color = models.CharField(max_length=20, default="#0d6efd")
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["codigo"]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "codigo"], name="unique_owner_plantilla_codigo")
+        ]
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
 
 class PersonaTurnos(models.Model):
     """
     Personas que agregas manualmente para el planificador (NO son usuarios).
     """
-    owner = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="personas_turnos"
-    )
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="personas_turnos")
     nombre = models.CharField(max_length=120)
+    grupo = models.ForeignKey(GrupoTrabajo, null=True, blank=True, on_delete=models.SET_NULL, related_name="personas")
     activo = models.BooleanField(default=True)
     orden = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -638,3 +678,4 @@ class Turno(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+

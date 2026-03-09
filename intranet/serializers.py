@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.contrib.auth.models import User
 from django.contrib.auth import get_user_model
-from .models import PersonaTurnos, TurnoPlanner
+from .models import PersonaTurnos, GrupoTrabajo, TurnoPlantilla, TurnoPlanner
 
 from .models import (
     ActaEntrega,
@@ -505,3 +505,27 @@ class TurnoPlannerSerializer(serializers.ModelSerializer):
         )
         dummy.clean()
         return attrs
+    
+class GrupoTrabajoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GrupoTrabajo
+        fields = ["id", "nombre", "color", "orden", "activo"]
+
+class TurnoPlantillaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TurnoPlantilla
+        fields = [
+            "id", "codigo", "nombre",
+            "entrada_1", "salida_1",
+            "entrada_2", "salida_2",
+            "almuerzo_inicio", "almuerzo_fin",
+            "color", "activo",
+        ]
+
+class PersonaTurnosSerializer(serializers.ModelSerializer):
+    grupo_nombre = serializers.CharField(source="grupo.nombre", read_only=True)
+    grupo_color = serializers.CharField(source="grupo.color", read_only=True)
+
+    class Meta:
+        model = PersonaTurnos
+        fields = ["id", "nombre", "grupo", "grupo_nombre", "grupo_color", "activo", "orden", "created_at"]
