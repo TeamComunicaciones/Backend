@@ -177,12 +177,20 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+CELERY_BROKER_URL = 'redis://127.0.0.1:6379/0'
+CELERY_RESULT_BACKEND = 'redis://127.0.0.1:6379/0'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'America/Bogota'
+
+from celery.schedules import crontab
+CELERY_BEAT_SCHEDULE = {
+    'vencer-comisiones-fecha-corte': {
+        'task': 'intranet.tasks.vencer_comisiones_por_inactividad',
+        'schedule': crontab(hour=0, minute=5),  # Todos los días a las 00:05 hora Colombia
+    },
+}
 
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'  # O el host de tu proveedor
@@ -199,3 +207,9 @@ GRAPH_CLIENT_SECRET = "***REMOVED-GRAPH_CLIENT_SECRET***"
 # Site de https://teamcommunicationsa.sharepoint.com/sites/ImgComisiones
 SHAREPOINT_COMISIONES_SITE_ID = "teamcommunicationsa.sharepoint.com,22796513-d288-4c5c-b76f-33a5b06152ed,43aa0dd9-70d7-449b-9e18-8f9285049df4"
 SHAREPOINT_COMISIONES_FOLDER = "Comprobantes"  # carpeta dentro de "Documentos compartidos"
+
+# Sobreescribir ajustes locales si existe el archivo (no subir al repo)
+try:
+    from .local_settings import *
+except ImportError:
+    pass

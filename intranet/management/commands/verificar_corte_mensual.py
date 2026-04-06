@@ -10,7 +10,7 @@ class Command(BaseCommand):
 
         try:
             # 1. Obtener el día de corte configurado desde la base de datos
-            config_dia_corte = Configuracion.objects.get(clave='DIA_CORTE_MENSUAL')
+            config_dia_corte = Configuracion.objects.get(clave='FECHA_CORTE_DIA')
             dia_de_corte = int(config_dia_corte.valor)
             self.stdout.write(f"Día de corte configurado: {dia_de_corte}")
 

@@ -131,7 +131,7 @@ from .serializers import (
     PagoComisionAdminSerializer, UserDataSerializer
 )
 from .services import process_sales_report_file
-from .tasks import procesar_archivo_comisiones
+from .tasks import procesar_archivo_comisiones, vencer_comisiones_por_inactividad
 from .permissions import admin_permission_required # Asegúrate de que esta importación sea correcta
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
@@ -2596,7 +2596,12 @@ def fecha_corte_view(request):
             clave=CLAVE_CONFIG,
             defaults={'valor': str(nuevo_dia)}
         )
-        
+
+        # Si hoy mismo es el día de corte configurado, disparar el vencimiento de inmediato
+        # (cubre el caso en que el Beat ya corrió antes de que el admin guardara la fecha)
+        if date.today().day == int(nuevo_dia):
+            vencer_comisiones_por_inactividad.delay()
+
         return Response({'mensaje': f'Fecha de corte actualizada correctamente al día {nuevo_dia} de cada mes.'})
 
 

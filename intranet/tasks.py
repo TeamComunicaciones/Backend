@@ -88,14 +88,14 @@ El equipo de Tu App
 def _get_fecha_corte_helper():
     """Obtiene el día de corte desde el modelo Configuracion. Si no existe, devuelve 1."""
     try:
-        config = models.Configuracion.objects.get(clave='dia_corte')
+        config = models.Configuracion.objects.get(clave='FECHA_CORTE_DIA')
         dia = int(config.valor)
         if 1 <= dia <= 31:
             return dia
         return 1
     except (models.Configuracion.DoesNotExist, ValueError):
         logger.warning(
-            "No se encontró una configuración válida para 'dia_corte'. Usando el valor predeterminado: 1."
+            "No se encontró una configuración válida para 'FECHA_CORTE_DIA'. Usando el valor predeterminado: 1."
         )
         return 1
 
