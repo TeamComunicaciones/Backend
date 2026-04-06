@@ -2597,9 +2597,10 @@ def fecha_corte_view(request):
             defaults={'valor': str(nuevo_dia)}
         )
 
-        # Si hoy mismo es el día de corte configurado, disparar el vencimiento de inmediato
+        # Si ayer fue el día de corte configurado, disparar el vencimiento de inmediato
         # (cubre el caso en que el Beat ya corrió antes de que el admin guardara la fecha)
-        if date.today().day == int(nuevo_dia):
+        from datetime import timedelta
+        if (date.today() - timedelta(days=1)).day == int(nuevo_dia):
             vencer_comisiones_por_inactividad.delay()
 
         return Response({'mensaje': f'Fecha de corte actualizada correctamente al día {nuevo_dia} de cada mes.'})

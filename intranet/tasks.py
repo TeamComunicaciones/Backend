@@ -12,7 +12,7 @@ import time
 import logging
 import locale
 import base64
-from datetime import date, datetime, time as dt_time
+from datetime import date, datetime, time as dt_time, timedelta
 from dateutil.relativedelta import relativedelta
 from calendar import monthrange
 from django.utils import timezone
@@ -408,23 +408,23 @@ def vencer_comisiones_por_inactividad():
     Tarea programada que se ejecuta el día de corte para evaluar el ciclo anterior.
     """
     today = date.today()
+    ayer = today - timedelta(days=1)
     dia_corte = _get_fecha_corte_helper()
 
-    if today.day == dia_corte:
+    if ayer.day == dia_corte:
         logger.info(
-            f"Hoy es día {dia_corte}, el día de corte. Ejecutando vencimiento por inactividad."
+            f"Ayer fue el día de corte ({dia_corte}). Ejecutando vencimiento por inactividad."
         )
-        # El mes de referencia para el ciclo que acaba de terminar es el mes actual.
-        # El helper calculará el período correcto (p.ej., del día de corte del mes pasado a ayer)
-        mes_de_referencia = today.replace(day=1)
+        # El mes de referencia es el mes del día de corte (ayer).
+        mes_de_referencia = ayer.replace(day=1)
 
         # La tarea programada solo necesita ejecutar el helper, no necesita la lista de pdv activos
         mensaje_resultado, _ = _vencer_por_inactividad_helper(mes_de_referencia)
         return mensaje_resultado
     else:
         mensaje = (
-            f"Hoy es día {today.day}. La tarea solo se ejecuta el día "
-            f"{dia_corte} de cada mes. No se hace nada."
+            f"Hoy es día {today.day}. La tarea se ejecuta el día posterior al corte "
+            f"(día {dia_corte} + 1). No se hace nada."
         )
         logger.info(mensaje)
         return mensaje
