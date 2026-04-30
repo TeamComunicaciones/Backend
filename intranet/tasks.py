@@ -418,8 +418,15 @@ def vencer_comisiones_por_inactividad():
         # El mes de referencia es el mes del día de corte (ayer).
         mes_de_referencia = ayer.replace(day=1)
 
-        # La tarea programada solo necesita ejecutar el helper, no necesita la lista de pdv activos
+        # Paso 1: vencer comisiones de PDV inactivos
         mensaje_resultado, _ = _vencer_por_inactividad_helper(mes_de_referencia)
+
+        # Paso 2: vencer todo lo que quede en Pendiente o Acumulada (PDV activos incluidos)
+        restantes = models.Comision.objects.filter(
+            estado__in=['Pendiente', 'Acumulada']
+        ).update(estado='Vencida')
+        logger.info(f"Vencimiento total de cierre: {restantes} comisiones adicionales vencidas.")
+
         return mensaje_resultado
     else:
         mensaje = (
