@@ -11,20 +11,23 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
-import os 
+import os
+
+from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+load_dotenv(BASE_DIR / '.env')
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = '***REMOVED-SECRET_KEY***'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
     "teamcomunicaciones.com.co",
@@ -68,8 +71,8 @@ AUTHENTICATION_BACKENDS = (
 SOCIALACCOUNT_PROVIDERS = {
     'microsoft': {
         'APP': {
-            'client_id': '46a313cf-1a14-4d9a-8b79-9679cc6caeec',
-            'secret': '***REMOVED-MS_OAUTH_SECRET***',
+            'client_id': os.environ.get('MS_OAUTH_CLIENT_ID', ''),
+            'secret': os.environ.get('MS_OAUTH_CLIENT_SECRET', ''),
             'key': ''
         },
         'AUTH_PARAMS': {
@@ -127,11 +130,11 @@ WSGI_APPLICATION = 'backend.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'defaultdb',
-        'USER': 'doadmin',
-        'PASSWORD': '***REMOVED-DB_PASSWORD***',
-        'HOST': '***REMOVED-DB_HOST***',
-        'PORT': '25060',
+        'NAME': os.environ.get('DB_NAME', ''),
+        'USER': os.environ.get('DB_USER', ''),
+        'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+        'HOST': os.environ.get('DB_HOST', ''),
+        'PORT': os.environ.get('DB_PORT', '5432'),
     }
 }
 
@@ -200,16 +203,36 @@ EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')  # ¡Usa variables de entorn
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD') # ¡Usa variables de entorno!
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
-GRAPH_TENANT_ID = "69002990-8016-415d-a552-cd21c7ad750c"
-GRAPH_CLIENT_ID = "46a313cf-1a14-4d9a-8b79-9679cc6caeec"
-GRAPH_CLIENT_SECRET = "***REMOVED-GRAPH_CLIENT_SECRET***"  
+GRAPH_TENANT_ID = os.environ.get('GRAPH_TENANT_ID', '')
+GRAPH_CLIENT_ID = os.environ.get('GRAPH_CLIENT_ID', '')
+GRAPH_CLIENT_SECRET = os.environ.get('GRAPH_CLIENT_SECRET', '')
 
 # Site de https://teamcommunicationsa.sharepoint.com/sites/ImgComisiones
 SHAREPOINT_COMISIONES_SITE_ID = "teamcommunicationsa.sharepoint.com,22796513-d288-4c5c-b76f-33a5b06152ed,43aa0dd9-70d7-449b-9e18-8f9285049df4"
 SHAREPOINT_COMISIONES_FOLDER = "Comprobantes"  # carpeta dentro de "Documentos compartidos"
+
+# Integración Shopify (usada en intranet/views.py: shopify_token, shopify_return)
+SHOPIFY_API_KEY = os.environ.get('SHOPIFY_API_KEY', '')
+SHOPIFY_API_SECRET = os.environ.get('SHOPIFY_API_SECRET', '')
 
 # Sobreescribir ajustes locales si existe el archivo (no subir al repo)
 try:
     from .local_settings import *
 except ImportError:
     pass
+
+# --- Validación de configuración crítica ---
+# Se valida aquí (después de local_settings, por si ese archivo llegara a
+# definir alguno de estos valores) para fallar rápido con un mensaje claro
+# si falta configuración obligatoria.
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "Falta DJANGO_SECRET_KEY. Copiá .env.example a .env (junto a manage.py) "
+        "y completá los valores, o definí la variable de entorno directamente."
+    )
+
+if not DEBUG and not DATABASES['default']['PASSWORD']:
+    raise ImproperlyConfigured(
+        "Falta DB_PASSWORD (y probablemente DB_NAME/DB_USER/DB_HOST). "
+        "Definí las variables de entorno de base de datos antes de arrancar con DEBUG=False."
+    )

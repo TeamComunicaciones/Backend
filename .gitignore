@@ -49,3 +49,9 @@ htmlcov/
 Thumbs.db
 Desktop.ini
 venvBackCompatible/
+
+# Herramientas/artefactos locales de trabajo (no forman parte del repositorio original)
+.agents/
+.claude/
+Contexto_Proyecto_Backend.md
+PLAN_REFACTOR_BACKEND.md

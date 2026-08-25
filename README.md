@@ -27,8 +27,19 @@ venv\Scripts\activate        # Windows
 # 2. Instalar dependencias
 pip install -r requirements.txt
 
-# 3. Crear archivo de configuración local (apunta a SQLite en lugar de PostgreSQL)
-# Crear backend/local_settings.py con el siguiente contenido:
+# 3. Crear archivo .env (junto a manage.py) a partir de la plantilla
+copy .env.example .env        # Windows
+# cp .env.example .env        # Linux/Mac
+#
+# Completar al menos DJANGO_SECRET_KEY (podés generarla con:
+#   python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+# ). Las variables de PostgreSQL (DB_*), Microsoft Graph, Shopify y del SQL
+# Server externo "Stok" pueden dejarse vacías si no vas a probar esas
+# integraciones en local. Ver .env.example para el detalle de cada variable.
+#
+# Si preferís usar SQLite en vez de PostgreSQL en local, no hace falta tocar
+# .env: alcanza con sobreescribir DATABASES en backend/local_settings.py
+# (archivo opcional, ignorado por git):
 #
 #   from pathlib import Path
 #   BASE_DIR = Path(__file__).resolve().parent.parent
@@ -38,7 +49,6 @@ pip install -r requirements.txt
 #           'NAME': BASE_DIR / 'db_local.sqlite3',
 #       }
 #   }
-#   EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
 # 4. Aplicar migraciones
 python manage.py migrate
@@ -98,6 +108,12 @@ celery -A backend beat -l info
 ## Despliegue en producción
 
 El servidor es un Droplet de DigitalOcean (Ubuntu). El código vive en `/var/www/backend/backend-teams-comunicaciones/`.
+
+### Variables de entorno requeridas
+
+`backend/settings.py` ya no tiene secretos hardcodeados: todos se leen de variables de entorno (ver `.env.example` para la lista completa — `DJANGO_SECRET_KEY`, `DJANGO_DEBUG`, `DB_*`, `MS_OAUTH_*`, `GRAPH_*`, `SHOPIFY_*`, `STOK_DB_*`, `EMAIL_HOST_*`). En el servidor, la forma más simple es crear un archivo `.env` en `/var/www/backend/backend-teams-comunicaciones/.env` (junto a `manage.py`, mismo formato que `.env.example`) — `settings.py` lo carga automáticamente. **Ese `.env` de producción se crea y edita a mano en el servidor, nunca se sube al repositorio.**
+
+Alternativa equivalente: definir las mismas variables como `Environment=` (o `EnvironmentFile=`) en los `.service` de systemd de `gunicorn`, `celery` y `celerybeat`, como ya se hacía para `EMAIL_HOST_USER`/`EMAIL_HOST_PASSWORD` en el ejemplo de abajo.
 
 ### Solo la primera vez en el servidor
 

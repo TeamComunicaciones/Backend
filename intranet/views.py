@@ -135,6 +135,7 @@ from .tasks import procesar_archivo_comisiones, vencer_comisiones_por_inactivida
 from .permissions import admin_permission_required # Asegúrate de que esta importación sea correcta
 from .sharepoint_utils import upload_comision_image
 from .sharepoint_utils import download_comision_image
+from .sharepoint_utils import get_graph_access_token
 from rest_framework.views import APIView
 from .models import PersonaTurnos, TurnoPlanner,  GrupoTrabajo, TurnoPlantilla
 from .serializers import PersonaTurnosSerializer, TurnoPlannerSerializer, GrupoTrabajoSerializer, TurnoPlantillaSerializer, PersonaTurnosSerializer
@@ -4337,30 +4338,11 @@ def get_comprobante_view(request):
 
 @api_view(['POST'])
 def get_image_corresponsal(request):
-    tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-    client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-    client_secret = '***REMOVED-GRAPH_CLIENT_SECRET***'
+    # --- Token Microsoft Graph ---
+    # Credenciales leídas desde settings (variables de entorno) vía
+    # sharepoint_utils.get_graph_access_token(); lanza AuthenticationFailed si falla.
+    access_token = get_graph_access_token()
 
-    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-
-    data2 = {
-        'grant_type': 'client_credentials',
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'scope': 'https://graph.microsoft.com/.default'
-    }
-
-    response = requests.post(url, headers=headers, data=data2)
-
-    if response.status_code == 200:
-        access_token = response.json().get('access_token')
-    else:
-        raise AuthenticationFailed("Error getting access token")
-    
     # Lo que viene desde el front: exactamente lo que guardaste en BD
     # Puede ser:
     #   - "archivo.jpg"                                   (registros viejos)
@@ -4668,27 +4650,10 @@ def consignacion_corresponsal(request):
         # Parseo de fechas
         fecha_reporte = datetime.strptime(fecha_reporte_str, '%Y-%m-%d').date()
 
-        # --- Lógica de autenticación Microsoft Graph ---
-        # (IDEAL: mover estos valores a settings / variables de entorno)
-        tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-        client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-        client_secret = '***REMOVED-GRAPH_CLIENT_SECRET***'
-
-        url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        data_ms = {
-            'grant_type': 'client_credentials',
-            'client_id': client_id,
-            'client_secret': client_secret,
-            'scope': 'https://graph.microsoft.com/.default'
-        }
-
-        response_ms = requests.post(url, headers=headers, data=data_ms, timeout=30)
-        response_ms.raise_for_status()
-        access_token = response_ms.json().get('access_token')
-
-        if not access_token:
-            return Response({'detail': 'No se pudo obtener el access_token de Microsoft Graph.'}, status=503)
+        # --- Autenticación Microsoft Graph ---
+        # Credenciales leídas desde settings (GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET,
+        # a su vez desde variables de entorno) vía sharepoint_utils.get_graph_access_token().
+        access_token = get_graph_access_token()
 
         site_id = 'teamcommunicationsa.sharepoint.com,71134f24-154d-4138-8936-3ef32a41682e,1c13c18c-ec54-4bf0-8715-26331a20a826'
 
@@ -4795,28 +4760,9 @@ def get_image_corresponsal(request):
       { "url": "archivo.jpg" }
     """
     # --- Token Microsoft Graph ---
-    tenant_id = '69002990-8016-415d-a552-cd21c7ad750c'
-    client_id = '46a313cf-1a14-4d9a-8b79-9679cc6caeec'
-    client_secret = '***REMOVED-GRAPH_CLIENT_SECRET***'
-
-    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded'
-    }
-
-    data2 = {
-        'grant_type': 'client_credentials',
-        'client_id': client_id,
-        'client_secret': client_secret,
-        'scope': 'https://graph.microsoft.com/.default'
-    }
-
-    response = requests.post(url, headers=headers, data=data2)
-
-    if response.status_code == 200:
-        access_token = response.json().get('access_token')
-    else:
-        raise AuthenticationFailed("Error getting access token")
+    # Credenciales leídas desde settings (variables de entorno) vía
+    # sharepoint_utils.get_graph_access_token(); lanza AuthenticationFailed si falla.
+    access_token = get_graph_access_token()
 
     # Lo que viene desde el front: exactamente lo que guardaste en BD
     # Puede ser:
@@ -6379,8 +6325,8 @@ def deleteImagen(request):
 
 
 def shopify_token(request):
-    api_key = '***REMOVED-SHOPIFY_API_KEY***'	#Set Partner app api key
-    api_secret = '***REMOVED-SHOPIFY_API_SECRET***' #Set Partner app api secret
+    api_key = settings.SHOPIFY_API_KEY
+    api_secret = settings.SHOPIFY_API_SECRET
     scopes = 'write_products,read_content,read_discounts,read_locales'
     redirect_uri = 'https://api.teamcomunicaciones.com.co/api/v1.0/shopify-return'
     shop = 'quickstart-06207d6f.myshopify.com'
@@ -6390,8 +6336,8 @@ def shopify_token(request):
 
 @api_view(['GET'])
 def shopify_return(request):
-    api_key = '***REMOVED-SHOPIFY_API_KEY***'	#Set Partner app api key
-    api_secret = '***REMOVED-SHOPIFY_API_SECRET***' #Set Partner app api secret
+    api_key = settings.SHOPIFY_API_KEY
+    api_secret = settings.SHOPIFY_API_SECRET
     code = request.GET.get('code', '')
     shop = request.GET.get('shop', '')
     url = 'https://{}/admin/oauth/access_token'.format(shop)
