@@ -3125,6 +3125,90 @@ def formulas_prices(request, id=None):
     
 
 
+def _leer_excel_comisiones(archivo):
+    """
+    Lee el Excel de comisiones y valida que tenga una sola hoja, la columna
+    'MES PAGO' y un único mes de pago (ej: "Diciembre 2025").
+
+    Devuelve (df, mes_pago, errores). mes_pago es un pd.Period mensual;
+    si hay errores, df y mes_pago vienen en None.
+    """
+    # Guardamos la configuración de idioma actual para restaurarla después
+    current_locale = locale.setlocale(locale.LC_TIME)
+    try:
+        # Intentamos configurar el idioma a español (varios intentos según SO)
+        try:
+            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
+        except locale.Error:
+            try:
+                locale.setlocale(locale.LC_TIME, 'es_ES')
+            except locale.Error:
+                try:
+                    # Windows típico
+                    locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
+                except locale.Error:
+                    try:
+                        locale.setlocale(locale.LC_TIME, 'Spanish')
+                    except locale.Error:
+                        # Si nada funciona, seguimos con el locale actual
+                        pass
+
+        try:
+            xls = pd.ExcelFile(archivo)
+
+            # REGLA 1: Debe tener exactamente una hoja.
+            if len(xls.sheet_names) != 1:
+                return None, None, [f'Archivo rechazado: Debe contener exactamente una hoja, pero se encontraron {len(xls.sheet_names)}.']
+
+            df = pd.read_excel(xls, sheet_name=0, dtype=str)
+
+            # REGLA 2: La columna 'MES PAGO' es obligatoria.
+            if 'MES PAGO' not in df.columns:
+                return None, None, ['Archivo rechazado: Falta la columna obligatoria "MES PAGO".']
+
+            # REGLA 3: Todos los registros deben pertenecer a un único mes de PAGO.
+            # En el Excel viene algo como: "Diciembre 2025"
+            col_mes_pago = (
+                df['MES PAGO']
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .str.replace(r'\s+', ' ', regex=True)  # normaliza espacios
+            )
+
+            # Ejemplo esperado tras normalización: "diciembre 2025"
+            meses_pago = pd.to_datetime(
+                col_mes_pago,
+                format='%B %Y',
+                errors='coerce'
+            ).dt.to_period('M')
+
+            meses_validos = meses_pago.dropna()
+            meses_unicos = meses_validos.nunique()
+
+            if meses_unicos > 1:
+                meses_distintos = ", ".join(
+                    sorted({str(m) for m in meses_validos.unique()})
+                )
+                return None, None, [f'Archivo rechazado: Solo se permite un mes de PAGO por archivo, pero se encontraron estos meses: {meses_distintos}.']
+
+            if meses_unicos == 0:
+                return None, None, ['Archivo rechazado: No se encontraron registros con un formato de mes válido en "MES PAGO" (Ej: "Diciembre 2025").']
+
+            return df, meses_validos.unique()[0], []
+
+        except Exception:
+            return None, None, ['No se pudo leer el archivo. Verifique que sea un formato Excel (.xlsx) válido.']
+
+    finally:
+        # Restauramos el locale original para no afectar otras partes de la app
+        try:
+            locale.setlocale(locale.LC_TIME, current_locale)
+        except Exception:
+            # En caso extremo de error, lo ignoramos para no romper la petición
+            pass
+
+
 @api_view(['POST'])
 @parser_classes([MultiPartParser, FormParser])
 @asesor_permission_required(allow_supervisor=True, allow_admin=True)
@@ -3153,94 +3237,10 @@ def carga_comisiones_view(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Guardamos la configuración de idioma actual para restaurarla después
-    current_locale = locale.setlocale(locale.LC_TIME)
-    try:
-        # Intentamos configurar el idioma a español (varios intentos según SO)
-        try:
-            locale.setlocale(locale.LC_TIME, 'es_ES.UTF-8')
-        except locale.Error:
-            try:
-                locale.setlocale(locale.LC_TIME, 'es_ES')
-            except locale.Error:
-                try:
-                    # Windows típico
-                    locale.setlocale(locale.LC_TIME, 'Spanish_Spain.1252')
-                except locale.Error:
-                    try:
-                        locale.setlocale(locale.LC_TIME, 'Spanish')
-                    except locale.Error:
-                        # Si nada funciona, seguimos con el locale actual
-                        pass
-
-        # === SECCIÓN 3: VALIDACIÓN DE CONTENIDO DEL EXCEL ===
-        try:
-            xls = pd.ExcelFile(archivo)
-
-            # REGLA 1: Debe tener exactamente una hoja.
-            if len(xls.sheet_names) != 1:
-                return Response(
-                    {'errores': [f'Archivo rechazado: Debe contener exactamente una hoja, pero se encontraron {len(xls.sheet_names)}.']},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            df = pd.read_excel(xls, sheet_name=0, dtype=str)
-
-            # REGLA 2: La columna 'MES PAGO' es obligatoria.
-            if 'MES PAGO' not in df.columns:
-                return Response(
-                    {'errores': ['Archivo rechazado: Falta la columna obligatoria "MES PAGO".']},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # REGLA 3: Todos los registros deben pertenecer a un único mes de PAGO.
-            # En el Excel viene algo como: "Diciembre 2025"
-            col_mes_pago = (
-                df['MES PAGO']
-                .astype(str)
-                .str.strip()
-                .str.lower()
-                .str.replace(r'\s+', ' ', regex=True)  # normaliza espacios
-            )
-
-            # Ejemplo esperado tras normalización: "diciembre 2025"
-            meses_pago = pd.to_datetime(
-                col_mes_pago,
-                format='%B %Y',
-                errors='coerce'
-            ).dt.to_period('M')
-
-            meses_validos = meses_pago.dropna()
-            meses_unicos = meses_validos.nunique()
-
-            if meses_unicos > 1:
-                meses_distintos = ", ".join(
-                    sorted({str(m) for m in meses_validos.unique()})
-                )
-                return Response(
-                    {'errores': [f'Archivo rechazado: Solo se permite un mes de PAGO por archivo, pero se encontraron estos meses: {meses_distintos}.']},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            if meses_unicos == 0:
-                return Response(
-                    {'errores': ['Archivo rechazado: No se encontraron registros con un formato de mes válido en "MES PAGO" (Ej: "Diciembre 2025").']},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        except Exception:
-            return Response(
-                {'errores': ['No se pudo leer el archivo. Verifique que sea un formato Excel (.xlsx) válido.']},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    finally:
-        # Restauramos el locale original para no afectar otras partes de la app
-        try:
-            locale.setlocale(locale.LC_TIME, current_locale)
-        except Exception:
-            # En caso extremo de error, lo ignoramos para no romper la petición
-            pass
+    # === SECCIÓN 3: VALIDACIÓN DE CONTENIDO DEL EXCEL ===
+    _, _, errores = _leer_excel_comisiones(archivo)
+    if errores:
+        return Response({'errores': errores}, status=status.HTTP_400_BAD_REQUEST)
 
     # === SECCIÓN 4: GUARDADO Y EJECUCIÓN DE TAREA ASÍNCRONA ===
     with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_f:
@@ -3255,6 +3255,158 @@ def carga_comisiones_view(request):
         {'mensaje': 'Archivo validado y aceptado. El procesamiento ha comenzado en segundo plano.'},
         status=status.HTTP_202_ACCEPTED
     )
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+@admin_permission_required
+def preview_rutas_comisiones_view(request):
+    """
+    Compara las rutas del Excel de comisiones con las ya cargadas en el mismo
+    MES PAGO y devuelve qué IDPOS cambiarían de ruta. No modifica nada.
+    """
+    archivo = request.FILES.get('file')
+    if not archivo:
+        return Response(
+            {'error': 'No se proporcionó ningún archivo.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    df, mes_pago, errores = _leer_excel_comisiones(archivo)
+    if errores:
+        return Response({'errores': errores}, status=status.HTTP_400_BAD_REQUEST)
+
+    faltantes = [c for c in ('IDPOS', 'RUTA') if c not in df.columns]
+    if faltantes:
+        return Response(
+            {'errores': [f'Archivo rechazado: Falta la columna obligatoria "{c}".' for c in faltantes]},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # La RUTA se toma sin recortar, igual que la guarda la carga (tasks.py),
+    # para que coincida con lo ya cargado y no aparezcan cambios solo por espacios.
+    rutas_por_idpos = defaultdict(set)
+    for idpos, ruta in zip(df['IDPOS'], df['RUTA']):
+        idpos = str(idpos).strip() if pd.notna(idpos) else ''
+        if not idpos or pd.isna(ruta) or not str(ruta).strip():
+            continue
+        rutas_por_idpos[idpos].add(str(ruta))
+
+    conflictos = [
+        {'idpos': idpos, 'rutas': sorted(rutas)}
+        for idpos, rutas in sorted(rutas_por_idpos.items())
+        if len(rutas) > 1
+    ]
+    ruta_nueva_por_idpos = {
+        idpos: next(iter(rutas))
+        for idpos, rutas in rutas_por_idpos.items()
+        if len(rutas) == 1
+    }
+
+    filas_mes = (
+        models.Comision.objects
+        .filter(mes_pago__year=mes_pago.year, mes_pago__month=mes_pago.month)
+        .values('idpos', 'ruta')
+        .annotate(n=Count('id'), punto_de_venta=Max('punto_de_venta'))
+    )
+
+    cambios_por_idpos = {}
+    for fila in filas_mes:
+        ruta_nueva = ruta_nueva_por_idpos.get(fila['idpos'])
+        if ruta_nueva is None or fila['ruta'] == ruta_nueva:
+            continue
+        cambio = cambios_por_idpos.setdefault(fila['idpos'], {
+            'idpos': fila['idpos'],
+            'punto_de_venta': fila['punto_de_venta'],
+            'rutas_actuales': [],
+            'ruta_nueva': ruta_nueva,
+            'filas': 0,
+        })
+        cambio['rutas_actuales'].append(fila['ruta'] or '')
+        cambio['filas'] += fila['n']
+
+    cambios = sorted(cambios_por_idpos.values(), key=lambda c: c['idpos'])
+    for cambio in cambios:
+        cambio['rutas_actuales'].sort()
+
+    rutas_con_asesor = {
+        r.strip().lower()
+        for r in list(
+            models.Perfil.objects.exclude(ruta_asignada__isnull=True)
+            .values_list('ruta_asignada', flat=True)
+        ) + list(models.RutaAsignada.objects.values_list('ruta', flat=True))
+        if r
+    }
+    rutas_sin_asesor = sorted({
+        c['ruta_nueva'] for c in cambios
+        if c['ruta_nueva'].strip().lower() not in rutas_con_asesor
+    })
+
+    return Response({
+        'mes_pago': mes_pago.strftime('%Y-%m'),
+        'cambios': cambios,
+        'conflictos': conflictos,
+        'rutas_sin_asesor': rutas_sin_asesor,
+    })
+
+
+@api_view(['POST'])
+@admin_permission_required
+def aplicar_rutas_comisiones_view(request):
+    """
+    Cambia la ruta de todas las comisiones de cada IDPOS en el mes indicado,
+    incluidas las filas que crean los pagos. Los pagos no se tocan.
+
+    Body: {"mes_pago": "YYYY-MM", "cambios": [{"idpos": "...", "ruta_nueva": "..."}]}
+    """
+    try:
+        mes = datetime.strptime(str(request.data.get('mes_pago') or ''), '%Y-%m')
+    except ValueError:
+        return Response(
+            {'error': 'mes_pago es obligatorio y debe tener el formato YYYY-MM.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    cambios = request.data.get('cambios')
+    if not isinstance(cambios, list) or not cambios:
+        return Response(
+            {'error': 'No hay cambios para aplicar.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    for cambio in cambios:
+        if (
+            not isinstance(cambio, dict)
+            or not str(cambio.get('idpos') or '').strip()
+            or not str(cambio.get('ruta_nueva') or '').strip()
+        ):
+            return Response(
+                {'error': 'Cada cambio debe tener idpos y ruta_nueva.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    idpos_actualizados = 0
+    filas_actualizadas = 0
+    with transaction.atomic():
+        for cambio in cambios:
+            n = (
+                models.Comision.objects
+                .filter(
+                    idpos=str(cambio['idpos']).strip(),
+                    mes_pago__year=mes.year,
+                    mes_pago__month=mes.month,
+                )
+                .exclude(ruta=cambio['ruta_nueva'])
+                .update(ruta=cambio['ruta_nueva'])
+            )
+            if n:
+                idpos_actualizados += 1
+                filas_actualizadas += n
+
+    return Response({
+        'idpos_actualizados': idpos_actualizados,
+        'filas_actualizadas': filas_actualizadas,
+    })
 
     
 
