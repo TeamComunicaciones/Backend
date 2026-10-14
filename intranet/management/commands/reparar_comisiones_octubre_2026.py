@@ -9,9 +9,13 @@ Corrige dos incidentes:
 
 Pasos, en una sola transacción:
   1. Toma de la carga duplicada la ruta corregida de cada IDPOS.
-  2. Pasa a la comisión original los pagos registrados sobre copias duplicadas,
-     cuando la original está libre. Los pagos con algún caso dudoso no se tocan
-     y quedan en el informe para revisión.
+  2. Corrige los pagos registrados sobre copias duplicadas:
+       - si la original está libre, el pago pasa a la original;
+       - si la original ya está en el mismo pago o en otro, la copia sobra: el
+         total de comisiones del pago baja a lo real y el saldo pendiente se
+         recalcula (nunca negativo; lo pagado de más va a un informe aparte).
+     Lo pagado (monto_total_pagado) no se toca. Un pago que no se puede
+     corregir con certeza no se toca y queda en el informe para revisión.
   3. Borra la carga duplicada, salvo las filas de los pagos en revisión.
   4. Deshace el vencimiento: estado según la regla de la carga y producto
      original desde el Excel de octubre.
@@ -22,7 +26,8 @@ Sin --aplicar todo corre igual, pero la transacción se revierte al final.
 import csv
 import os
 from collections import defaultdict
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
+from decimal import Decimal
 
 import pandas as pd
 from django.core.management.base import BaseCommand, CommandError
@@ -36,6 +41,12 @@ INICIO_CARGA_ORIGINAL = datetime(2026, 10, 5, 15, 43, tzinfo=dt_timezone.utc)
 INICIO_CARGA_DUPLICADA = datetime(2026, 10, 13, 22, 58, tzinfo=dt_timezone.utc)
 FIN_CARGA_DUPLICADA = datetime(2026, 10, 13, 23, 10, tzinfo=dt_timezone.utc)
 PRODUCTO_NO_VISITA = 'Vencida por no visita'
+HORA_COLOMBIA = dt_timezone(timedelta(hours=-5))
+
+MOVER = 'mover'
+MISMO_PAGO = 'la original está en el mismo pago'
+OTRO_PAGO = 'la original ya está pagada en otro pago'
+SIN_ORIGINAL = 'sin comisión original'
 
 Q_MES = Q(mes_pago__year=ANIO, mes_pago__month=MES)
 Q_LEDGER = (
@@ -121,7 +132,7 @@ def _reparar(productos, informe):
     resumen['IDPOS con ruta corregida'] = len(ruta_por_idpos)
     resumen['IDPOS con dos rutas en la carga duplicada (no se tocan)'] = len(conflictos_ruta)
 
-    en_revision = _pasar_pagos_a_originales(duplicadas, originales, informe, resumen)
+    en_revision = _corregir_pagos(duplicadas, originales, informe, resumen)
 
     resumen['filas duplicadas borradas'] = duplicadas.exclude(id__in=en_revision).delete()[0]
     resumen['filas duplicadas que quedan (pagos en revisión)'] = len(en_revision)
@@ -155,10 +166,10 @@ def _rutas_corregidas(duplicadas):
     return unicas, conflictos
 
 
-def _pasar_pagos_a_originales(duplicadas, originales, informe, resumen):
+def _corregir_pagos(duplicadas, originales, informe, resumen):
     """
-    Devuelve los ids de las filas duplicadas que deben quedarse porque su pago
-    va a revisión.
+    Corrige los pagos hechos sobre copias duplicadas. Devuelve los ids de las
+    copias que deben quedarse porque su pago va a revisión.
     """
     pagadas = list(duplicadas.filter(pagos__isnull=False).values('id', 'pagos_id', *CLAVE))
     candidatas = defaultdict(list)
@@ -171,12 +182,14 @@ def _pasar_pagos_a_originales(duplicadas, originales, informe, resumen):
     por_pago = defaultdict(list)
     for fila in pagadas:
         por_pago[fila['pagos_id']].append(fila)
+    pagos = PagoComision.objects.select_related('creado_por').in_bulk(list(por_pago))
 
     usadas = set()
     movidas = 0
     en_revision = set()
-    filas_informe = []
+    filas_revision, corregidos, de_mas = [], [], []
     for pago_id, filas in sorted(por_pago.items()):
+        pago = pagos[pago_id]
         decisiones = []
         for fila in filas:
             opciones = [c for c in candidatas[tuple(fila[k] for k in CLAVE)] if c['id'] not in usadas]
@@ -184,47 +197,102 @@ def _pasar_pagos_a_originales(duplicadas, originales, informe, resumen):
             libre = next((c for c in opciones
                           if c['pagos_id'] is None and c['estado'] != 'Consolidada'), None)
             if misma:
-                motivo, original = 'la original está en el mismo pago', misma
+                motivo, original = MISMO_PAGO, misma
             elif libre:
-                motivo, original = 'mover', libre
+                motivo, original = MOVER, libre
             elif opciones:
-                motivo, original = 'la original ya está pagada en otro pago', opciones[0]
+                motivo, original = OTRO_PAGO, opciones[0]
             else:
-                motivo, original = 'sin comisión original', None
+                motivo, original = SIN_ORIGINAL, None
             if original:
                 usadas.add(original['id'])
             decisiones.append((fila, motivo, original))
 
-        if all(motivo == 'mover' for _, motivo, _ in decisiones):
-            for fila, _, original in decisiones:
-                Comision.objects.filter(id=original['id']).update(estado='Consolidada', pagos_id=pago_id)
-                movidas += 1
+        exceso = sum((f['comision_final'] or Decimal('0')
+                      for f, motivo, _ in decisiones if motivo in (MISMO_PAGO, OTRO_PAGO)), Decimal('0'))
+        correcto = pago.monto_comisiones - exceso
+        restante = correcto - pago.monto_total_pagado
+        saldos = list(Comision.objects.filter(iccid=f'SALDO-{pago_id}'))
+        saldo = saldos[0] if saldos else None
+
+        if any(motivo == SIN_ORIGINAL for _, motivo, _ in decisiones):
+            revision = 'hay copias sin comisión original'
+        elif len(saldos) > 1:
+            revision = 'el pago tiene más de un saldo pendiente'
+        elif exceso and saldo and saldo.pagos_id != pago_id:
+            revision = 'el saldo pendiente de este pago ya se cobró en otro pago'
+        elif exceso and restante > 0 and not saldo:
+            revision = 'falta el saldo pendiente que habría que corregir'
+        elif exceso and Comision.objects.filter(iccid=f'AJUSTE-{pago_id}').exists():
+            revision = 'el pago ya tiene un ajuste por sobrante'
+        elif correcto < 0:
+            revision = 'el total corregido queda negativo'
+        else:
+            revision = None
+
+        if revision:
+            en_revision.update(f['id'] for f, _, _ in decisiones)
+            filas_revision.extend(
+                [pago_id, f['id'], f['iccid'], f['idpos'], f['comision_final'], motivo,
+                 original['id'] if original else '', original['pagos_id'] if original else '', revision]
+                for f, motivo, original in decisiones
+            )
             continue
 
-        en_revision.update(fila['id'] for fila, _, _ in decisiones)
-        for fila, motivo, original in decisiones:
-            filas_informe.append([
-                pago_id, fila['id'], fila['iccid'], fila['idpos'], fila['comision_final'], motivo,
-                original['id'] if original else '', original['pagos_id'] if original else '',
-            ])
+        for _, motivo, original in decisiones:
+            if motivo == MOVER:
+                Comision.objects.filter(id=original['id']).update(estado='Consolidada', pagos_id=pago_id)
+                movidas += 1
+        if not exceso:
+            continue
+
+        saldo_antes = saldo.comision_final if saldo else Decimal('0')
+        total_antes = pago.monto_comisiones
+        pago.monto_comisiones = correcto
+        pago.save(update_fields=['monto_comisiones'])
+        if restante > 0:
+            saldo.comision_final = restante
+            saldo.save(update_fields=['comision_final'])
+        elif saldo:
+            saldo.delete()
+
+        datos = [pago_id, _hora_colombia(pago.fecha_pago),
+                 pago.creado_por.username if pago.creado_por else '', pago.idpos, pago.punto_de_venta]
+        pagado_de_mas = max(-restante, Decimal('0'))
+        corregidos.append(datos + [total_antes, correcto, pago.monto_total_pagado,
+                                   saldo_antes, max(restante, Decimal('0')), pagado_de_mas])
+        if pagado_de_mas:
+            otros = sorted({o['pagos_id'] for _, m, o in decisiones if m == OTRO_PAGO})
+            detalle = []
+            if any(m == MISMO_PAGO for _, m, _ in decisiones):
+                detalle.append('se seleccionaron la comisión original y su copia')
+            if otros:
+                detalle.append('comisiones ya pagadas en el pago ' + ', '.join(map(str, otros)))
+            de_mas.append(datos + [correcto, pago.monto_total_pagado, pagado_de_mas, '; '.join(detalle)])
 
     resumen['pagos sobre filas duplicadas'] = len(por_pago)
     resumen['filas de pago pasadas a la original'] = movidas
-    pagos_revision = sorted({f[0] for f in filas_informe})
-    resumen['pagos en revisión (no se tocan)'] = len(pagos_revision)
+    resumen['pagos corregidos'] = len(corregidos)
+    resumen['pagos con pago de más'] = len(de_mas)
+    resumen['total pagado de más'] = sum((f[7] for f in de_mas), Decimal('0'))
+    resumen['pagos en revisión (no se tocan)'] = len({f[0] for f in filas_revision})
 
+    encabezado = ['pago_id', 'fecha_pago_hora_colombia', 'registrado_por', 'idpos', 'punto_de_venta']
+    _escribir_csv(informe, 'pagos_corregidos.csv',
+                  encabezado + ['total_registrado_antes', 'total_correcto', 'se_pago',
+                                'saldo_pendiente_antes', 'saldo_pendiente_despues', 'pagado_de_mas'],
+                  corregidos)
+    _escribir_csv(informe, 'pagos_pagados_de_mas.csv',
+                  encabezado + ['se_debia', 'se_pago', 'pagado_de_mas', 'detalle'], de_mas)
     _escribir_csv(informe, 'filas_en_revision.csv',
                   ['pago_id', 'comision_duplicada_id', 'iccid', 'idpos', 'comision_final',
-                   'motivo', 'comision_original_id', 'pago_de_la_original'],
-                  filas_informe)
-    _escribir_csv(informe, 'pagos_en_revision.csv',
-                  ['pago_id', 'fecha_pago', 'registrado_por', 'idpos', 'punto_de_venta',
-                   'monto_comisiones', 'monto_total_pagado', 'metodos_pago'],
-                  [[p.id, p.fecha_pago, p.creado_por.username if p.creado_por else '', p.idpos,
-                    p.punto_de_venta, p.monto_comisiones, p.monto_total_pagado, p.metodos_pago]
-                   for p in PagoComision.objects.filter(id__in=pagos_revision)
-                   .select_related('creado_por').order_by('id')])
+                   'motivo', 'comision_original_id', 'pago_de_la_original', 'por_que_no_se_corrige'],
+                  filas_revision)
     return en_revision
+
+
+def _hora_colombia(fecha):
+    return fecha.astimezone(HORA_COLOMBIA).strftime('%Y-%m-%d %H:%M') if fecha else ''
 
 
 def _deshacer_vencimiento(productos, informe, resumen):
