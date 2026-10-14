@@ -183,9 +183,9 @@ def _fila(fecha, idpos, ruta, iccid, estado='Vencida', producto='PREPAGO', pago=
     return fila
 
 
-def _pago(idpos):
+def _pago(idpos, comisiones=1000, pagado=1000):
     return models.PagoComision.objects.create(
-        idpos=idpos, monto_total_pagado=1000, monto_comisiones=1000, metodos_pago={'Nequi': 1000},
+        idpos=idpos, monto_total_pagado=pagado, monto_comisiones=comisiones, metodos_pago={'Nequi': pagado},
     )
 
 
@@ -200,8 +200,14 @@ class RepararComisionesOctubreTests(TestCase):
                                     ('I5', 'PROD-I5'), ('I8', 'PREPAGO'), ('I10', 'PROD-I10')]
         ]).to_excel(self.excel, index=False)
 
-        pago_antes, pago_antes_p6 = _pago('P1'), _pago('P6')
-        self.pago_mover, self.pago_mixto, self.pago_doble = _pago('P4'), _pago('P5'), _pago('P6')
+        pago_antes, self.pago_antes_p6, otro_pago = _pago('P1'), _pago('P6'), _pago('P8')
+        self.pago_mover = _pago('P4')
+        # Original y copia seleccionadas juntas: se registró el doble y se pagó menos de lo debido
+        self.pago_mixto = _pago('P5', comisiones=2000, pagado=600)
+        # La original ya la había pagado otro pago: todo lo pagado aquí es de más
+        self.pago_doble = _pago('P6')
+        self.pago_sin_original = _pago('P9')
+        self.pago_saldo_cobrado = _pago('P8', comisiones=2000, pagado=500)
 
         o = FECHA_CARGA_ORIGINAL
         self.o1 = _fila(o, 'P1', 'RUTA A', 'I1', producto=NO_VISITA)
@@ -210,7 +216,8 @@ class RepararComisionesOctubreTests(TestCase):
         self.o4 = _fila(o, 'P3', 'RUTA A', 'I4')
         self.o5 = _fila(o, 'P4', 'RUTA A', 'I5', producto=NO_VISITA)
         self.o6 = _fila(o, 'P5', 'RUTA A', 'I6', estado='Consolidada', pagos=self.pago_mixto)
-        self.o7 = _fila(o, 'P6', 'RUTA A', 'I7', estado='Consolidada', pagos=pago_antes_p6)
+        self.o7 = _fila(o, 'P6', 'RUTA A', 'I7', estado='Consolidada', pagos=self.pago_antes_p6)
+        self.o11 = _fila(o, 'P8', 'RUTA A', 'I11', estado='Consolidada', pagos=self.pago_saldo_cobrado)
         self.o8 = _fila(o, 'P7', 'RUTA A', 'I8')
         self.o10 = _fila(o, 'P3', 'RUTA A', 'I10', pago='acumulado')
         self.manual = _fila(o, 'P3', 'RUTA A', 'MANUAL-1', producto=NO_VISITA, pago=None)
@@ -226,8 +233,16 @@ class RepararComisionesOctubreTests(TestCase):
         self.d5 = _fila(d, 'P4', 'RUTA A', 'I5', estado='Consolidada', pagos=self.pago_mover)
         self.d6 = _fila(d, 'P5', 'RUTA A', 'I6', estado='Consolidada', pagos=self.pago_mixto)
         self.d7 = _fila(d, 'P6', 'RUTA A', 'I7', estado='Consolidada', pagos=self.pago_doble)
-        self.saldo = _fila(FECHA_PAGO_NOCHE, 'P4', 'RUTA A', f'SALDO-{self.pago_mover.id}',
+        self.d9 = _fila(d, 'P9', 'RUTA A', 'I9', estado='Consolidada', pagos=self.pago_sin_original)
+        self.d11 = _fila(d, 'P8', 'RUTA A', 'I11', estado='Consolidada', pagos=self.pago_saldo_cobrado)
+
+        n = FECHA_PAGO_NOCHE
+        self.saldo = _fila(n, 'P4', 'RUTA A', f'SALDO-{self.pago_mover.id}',
                            producto=NO_VISITA, pagos=self.pago_mover)
+        self.saldo_mixto = _fila(n, 'P5', 'RUTA A', f'SALDO-{self.pago_mixto.id}', pagos=self.pago_mixto)
+        models.Comision.objects.filter(pk=self.saldo_mixto.pk).update(comision_final=1400)
+        self.saldo_cobrado = _fila(n, 'P8', 'RUTA A', f'SALDO-{self.pago_saldo_cobrado.id}',
+                                   estado='Consolidada', pagos=otro_pago)
 
     def _correr(self, aplicar):
         opciones = {'excel': self.excel, 'informe': self.carpeta, 'stdout': StringIO()}
@@ -236,8 +251,11 @@ class RepararComisionesOctubreTests(TestCase):
         call_command('reparar_comisiones_octubre_2026', **opciones)
 
     def _foto(self):
-        return list(models.Comision.objects.order_by('id')
-                    .values_list('id', 'estado', 'producto', 'ruta', 'pagos_id'))
+        return (
+            list(models.Comision.objects.order_by('id')
+                 .values_list('id', 'estado', 'producto', 'ruta', 'pagos_id', 'comision_final')),
+            list(models.PagoComision.objects.order_by('id').values_list('id', 'monto_comisiones')),
+        )
 
     def _csv(self, nombre):
         with open(os.path.join(self.carpeta, nombre), encoding='utf-8-sig') as f:
@@ -253,29 +271,49 @@ class RepararComisionesOctubreTests(TestCase):
         self._correr(aplicar=False)
 
         self.assertEqual(self._foto(), antes)
-        pagos = {int(f['pago_id']) for f in self._csv('pagos_en_revision.csv')}
-        self.assertEqual(pagos, {self.pago_mixto.id, self.pago_doble.id})
+        de_mas = {int(f['pago_id']) for f in self._csv('pagos_pagados_de_mas.csv')}
+        self.assertEqual(de_mas, {self.pago_doble.id})
 
     def test_borra_duplicados_y_pasa_el_pago_a_la_original_libre(self):
         self._correr(aplicar=True)
 
-        quedan = set(models.Comision.objects.filter(
-            id__in=[f.id for f in self.duplicadas_libres] + [self.d5.id, self.d6.id, self.d7.id]
-        ).values_list('id', flat=True))
-        self.assertEqual(quedan, {self.d6.id, self.d7.id})
+        duplicadas = [f.id for f in self.duplicadas_libres] + [
+            self.d5.id, self.d6.id, self.d7.id, self.d9.id, self.d11.id]
+        quedan = set(models.Comision.objects.filter(id__in=duplicadas).values_list('id', flat=True))
+        self.assertEqual(quedan, {self.d9.id, self.d11.id})
         self.o5.refresh_from_db()
         self.assertEqual((self.o5.estado, self.o5.pagos_id), ('Consolidada', self.pago_mover.id))
 
-    def test_pagos_dudosos_quedan_intactos_y_en_el_informe(self):
+    def test_pago_con_original_y_copia_queda_con_total_y_saldo_reales(self):
         self._correr(aplicar=True)
 
-        self._recargar(self.d6, self.d7)
-        self.assertEqual(self.d6.pagos_id, self.pago_mixto.id)
-        self.assertEqual(self.d7.pagos_id, self.pago_doble.id)
-        motivos = {int(f['comision_duplicada_id']): f['motivo'] for f in self._csv('filas_en_revision.csv')}
+        self._recargar(self.pago_mixto, self.saldo_mixto, self.o6)
+        self.assertEqual(self.pago_mixto.monto_comisiones, 1000)
+        self.assertEqual(self.pago_mixto.monto_total_pagado, 600)
+        self.assertEqual((self.saldo_mixto.comision_final, self.saldo_mixto.estado), (400, 'Pendiente'))
+        self.assertEqual(self.o6.pagos_id, self.pago_mixto.id)
+
+    def test_pago_de_mas_queda_sin_saldo_y_en_su_informe(self):
+        self._correr(aplicar=True)
+
+        self.pago_doble.refresh_from_db()
+        self.assertEqual(self.pago_doble.monto_comisiones, 0)
+        [fila] = self._csv('pagos_pagados_de_mas.csv')
+        self.assertEqual((fila['se_debia'], fila['se_pago'], fila['pagado_de_mas']), ('0.00', '1000.00', '1000.00'))
+        self.assertIn(f'ya pagadas en el pago {self.pago_antes_p6.id}', fila['detalle'])
+        corregidos = {int(f['pago_id']) for f in self._csv('pagos_corregidos.csv')}
+        self.assertEqual(corregidos, {self.pago_mixto.id, self.pago_doble.id})
+
+    def test_pagos_que_no_se_pueden_corregir_no_se_tocan(self):
+        self._correr(aplicar=True)
+
+        self._recargar(self.d9, self.d11, self.pago_saldo_cobrado)
+        self.assertEqual(self.d9.pagos_id, self.pago_sin_original.id)
+        self.assertEqual(self.pago_saldo_cobrado.monto_comisiones, 2000)
+        motivos = {int(f['pago_id']): f['por_que_no_se_corrige'] for f in self._csv('filas_en_revision.csv')}
         self.assertEqual(motivos, {
-            self.d6.id: 'la original está en el mismo pago',
-            self.d7.id: 'la original ya está pagada en otro pago',
+            self.pago_sin_original.id: 'hay copias sin comisión original',
+            self.pago_saldo_cobrado.id: 'el saldo pendiente de este pago ya se cobró en otro pago',
         })
 
     def test_deshace_el_vencimiento_con_estado_y_producto_originales(self):
