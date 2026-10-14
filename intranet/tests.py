@@ -1,11 +1,15 @@
-from datetime import date
-from io import BytesIO
+import csv
+import os
+import tempfile
+from datetime import date, datetime, timezone as dt_timezone
+from io import BytesIO, StringIO
 
 import jwt
 import pandas as pd
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -160,3 +164,158 @@ class LeerExcelComisionesTests(TestCase):
 
         self.assertEqual(errores, [])
         self.assertEqual(mes_pago.strftime('%Y-%m'), '2026-10')
+
+
+FECHA_CARGA_ORIGINAL = datetime(2026, 10, 5, 16, 0, tzinfo=dt_timezone.utc)
+FECHA_CARGA_DUPLICADA = datetime(2026, 10, 13, 23, 0, tzinfo=dt_timezone.utc)
+FECHA_PAGO_NOCHE = datetime(2026, 10, 13, 23, 30, tzinfo=dt_timezone.utc)
+NO_VISITA = 'Vencida por no visita'
+
+
+def _fila(fecha, idpos, ruta, iccid, estado='Vencida', producto='PREPAGO', pago='',
+          mes=OCTUBRE, pagos=None):
+    fila = models.Comision.objects.create(
+        asesor_identificador='asesor', iccid=iccid, idpos=idpos, punto_de_venta=f'PDV {idpos}',
+        ruta=ruta, mes_pago=mes, mes_liquidacion=mes, comision_final=1000, estado=estado,
+        producto=producto, pago=pago, pagos=pagos, co_id=f'CO-{iccid}', min='300',
+    )
+    models.Comision.objects.filter(pk=fila.pk).update(fecha_carga=fecha)
+    return fila
+
+
+def _pago(idpos):
+    return models.PagoComision.objects.create(
+        idpos=idpos, monto_total_pagado=1000, monto_comisiones=1000, metodos_pago={'Nequi': 1000},
+    )
+
+
+class RepararComisionesOctubreTests(TestCase):
+
+    def setUp(self):
+        self.carpeta = tempfile.mkdtemp()
+        self.excel = os.path.join(self.carpeta, 'octubre.xlsx')
+        pd.DataFrame([
+            {'ICCID': iccid, 'PRODUCTO': producto, 'MES PAGO': 'Octubre 2026'}
+            for iccid, producto in [('I1', 'PROD-I1'), ('I2', 'PROD-I2'), ('I4', 'PREPAGO'),
+                                    ('I5', 'PROD-I5'), ('I8', 'PREPAGO'), ('I10', 'PROD-I10')]
+        ]).to_excel(self.excel, index=False)
+
+        pago_antes, pago_antes_p6 = _pago('P1'), _pago('P6')
+        self.pago_mover, self.pago_mixto, self.pago_doble = _pago('P4'), _pago('P5'), _pago('P6')
+
+        o = FECHA_CARGA_ORIGINAL
+        self.o1 = _fila(o, 'P1', 'RUTA A', 'I1', producto=NO_VISITA)
+        self.o2 = _fila(o, 'P1', 'RUTA A', 'I2', estado='Consolidada', pagos=pago_antes)
+        self.o3 = _fila(o, 'P2', 'RUTA A', '', producto=NO_VISITA)
+        self.o4 = _fila(o, 'P3', 'RUTA A', 'I4')
+        self.o5 = _fila(o, 'P4', 'RUTA A', 'I5', producto=NO_VISITA)
+        self.o6 = _fila(o, 'P5', 'RUTA A', 'I6', estado='Consolidada', pagos=self.pago_mixto)
+        self.o7 = _fila(o, 'P6', 'RUTA A', 'I7', estado='Consolidada', pagos=pago_antes_p6)
+        self.o8 = _fila(o, 'P7', 'RUTA A', 'I8')
+        self.o10 = _fila(o, 'P3', 'RUTA A', 'I10', pago='acumulado')
+        self.manual = _fila(o, 'P3', 'RUTA A', 'MANUAL-1', producto=NO_VISITA, pago=None)
+        self.septiembre = _fila(datetime(2026, 9, 3, tzinfo=dt_timezone.utc), 'P1', 'RUTA A', 'I1S',
+                                producto=NO_VISITA, mes=SEPTIEMBRE)
+
+        d = FECHA_CARGA_DUPLICADA
+        self.duplicadas_libres = [
+            _fila(d, 'P1', 'RUTA B', 'I1'), _fila(d, 'P1', 'RUTA B', 'I2'), _fila(d, 'P2', 'RUTA A', ''),
+            _fila(d, 'P3', 'RUTA A', 'I4'), _fila(d, 'P3', 'RUTA A', 'I10', pago='acumulado'),
+            _fila(d, 'P7', 'RUTA C', 'I8'), _fila(d, 'P7', 'RUTA D', 'I8B'),
+        ]
+        self.d5 = _fila(d, 'P4', 'RUTA A', 'I5', estado='Consolidada', pagos=self.pago_mover)
+        self.d6 = _fila(d, 'P5', 'RUTA A', 'I6', estado='Consolidada', pagos=self.pago_mixto)
+        self.d7 = _fila(d, 'P6', 'RUTA A', 'I7', estado='Consolidada', pagos=self.pago_doble)
+        self.saldo = _fila(FECHA_PAGO_NOCHE, 'P4', 'RUTA A', f'SALDO-{self.pago_mover.id}',
+                           producto=NO_VISITA, pagos=self.pago_mover)
+
+    def _correr(self, aplicar):
+        opciones = {'excel': self.excel, 'informe': self.carpeta, 'stdout': StringIO()}
+        if aplicar:
+            opciones['aplicar'] = True
+        call_command('reparar_comisiones_octubre_2026', **opciones)
+
+    def _foto(self):
+        return list(models.Comision.objects.order_by('id')
+                    .values_list('id', 'estado', 'producto', 'ruta', 'pagos_id'))
+
+    def _csv(self, nombre):
+        with open(os.path.join(self.carpeta, nombre), encoding='utf-8-sig') as f:
+            return list(csv.DictReader(f))
+
+    def _recargar(self, *filas):
+        for fila in filas:
+            fila.refresh_from_db()
+
+    def test_simulacion_no_guarda_nada_pero_escribe_el_informe(self):
+        antes = self._foto()
+
+        self._correr(aplicar=False)
+
+        self.assertEqual(self._foto(), antes)
+        pagos = {int(f['pago_id']) for f in self._csv('pagos_en_revision.csv')}
+        self.assertEqual(pagos, {self.pago_mixto.id, self.pago_doble.id})
+
+    def test_borra_duplicados_y_pasa_el_pago_a_la_original_libre(self):
+        self._correr(aplicar=True)
+
+        quedan = set(models.Comision.objects.filter(
+            id__in=[f.id for f in self.duplicadas_libres] + [self.d5.id, self.d6.id, self.d7.id]
+        ).values_list('id', flat=True))
+        self.assertEqual(quedan, {self.d6.id, self.d7.id})
+        self.o5.refresh_from_db()
+        self.assertEqual((self.o5.estado, self.o5.pagos_id), ('Consolidada', self.pago_mover.id))
+
+    def test_pagos_dudosos_quedan_intactos_y_en_el_informe(self):
+        self._correr(aplicar=True)
+
+        self._recargar(self.d6, self.d7)
+        self.assertEqual(self.d6.pagos_id, self.pago_mixto.id)
+        self.assertEqual(self.d7.pagos_id, self.pago_doble.id)
+        motivos = {int(f['comision_duplicada_id']): f['motivo'] for f in self._csv('filas_en_revision.csv')}
+        self.assertEqual(motivos, {
+            self.d6.id: 'la original está en el mismo pago',
+            self.d7.id: 'la original ya está pagada en otro pago',
+        })
+
+    def test_deshace_el_vencimiento_con_estado_y_producto_originales(self):
+        self._correr(aplicar=True)
+
+        self._recargar(self.o1, self.o3, self.o4, self.o5, self.o10, self.manual, self.saldo)
+        self.assertEqual((self.o1.estado, self.o1.producto), ('Pendiente', 'PROD-I1'))
+        self.assertEqual((self.o3.estado, self.o3.producto), ('Acumulada', ''))
+        self.assertEqual((self.o4.estado, self.o4.producto), ('Pendiente', 'PREPAGO'))
+        self.assertEqual(self.o5.producto, 'PROD-I5')
+        self.assertEqual(self.o10.estado, 'Acumulada')
+        self.assertEqual((self.manual.estado, self.manual.producto), ('Pendiente', None))
+        self.assertEqual((self.saldo.estado, self.saldo.producto),
+                         ('Pendiente', f'SALDO PENDIENTE PAGO #{self.pago_mover.id}'))
+
+    def test_no_toca_meses_anteriores(self):
+        self._correr(aplicar=True)
+
+        self.septiembre.refresh_from_db()
+        self.assertEqual((self.septiembre.estado, self.septiembre.producto), ('Vencida', NO_VISITA))
+
+    def test_aplica_las_rutas_corregidas_salvo_idpos_con_dos_rutas(self):
+        self._correr(aplicar=True)
+
+        self._recargar(self.o1, self.o2, self.o8)
+        self.assertEqual((self.o1.ruta, self.o2.ruta), ('RUTA B', 'RUTA B'))
+        self.assertEqual(self.o8.ruta, 'RUTA A')
+        self.assertEqual([f['idpos'] for f in self._csv('idpos_con_dos_rutas.csv')], ['P7'])
+
+    def test_correrlo_dos_veces_no_cambia_nada_mas(self):
+        self._correr(aplicar=True)
+        despues = self._foto()
+
+        self._correr(aplicar=True)
+
+        self.assertEqual(self._foto(), despues)
+
+    def test_rechaza_un_excel_de_otro_mes(self):
+        pd.DataFrame([{'ICCID': 'I1', 'PRODUCTO': 'X', 'MES PAGO': 'Septiembre 2026'}]).to_excel(
+            self.excel, index=False)
+
+        with self.assertRaisesMessage(Exception, 'no es de octubre 2026'):
+            self._correr(aplicar=False)
